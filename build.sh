@@ -63,6 +63,16 @@ tar xzf expat.tar.gz
       CC="${CROSS}gcc" AR="${CROSS}ar" RANLIB="${CROSS}ranlib" && \
   make -j"$JOBS" && make install )
 
+# A régi NetSurf-forrás sok figyelmeztetést vált ki, az új GCC viszont -Werror-ral
+# hibává teszi őket. Egy fordító-becsomagolóval a sor VÉGÉRE tesszük a -Wno-error-t
+# (az nyer minden korábbi -Werror felett), így a figyelmeztetések nem végzetesek.
+REALGCC="$(command -v "${CROSS}gcc")"
+WRAP="$ROOT/ccwrap"
+mkdir -p "$WRAP"
+printf '#!/bin/sh\nexec "%s" "$@" -Wno-error\n' "$REALGCC" > "$WRAP/${CROSS}gcc"
+chmod +x "$WRAP/${CROSS}gcc"
+export PATH="$WRAP:$PATH"
+
 export CFLAGS="-I$PREFIX/include -O2"
 export LDFLAGS="-L$PREFIX/lib"
 export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
