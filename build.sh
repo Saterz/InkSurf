@@ -165,11 +165,16 @@ BIN="$(find "$SRC/netsurf" -maxdepth 2 -name 'nsfb' -type f | head -n1 || true)"
 [ -n "$BIN" ] || { echo "HIBA: nem találom a lefordított binárist"; exit 1; }
 
 cp "$BIN" "$OUT/netsurf"
+# FONTOS: -L, hogy a framebuffer res szimbolikus linkjei (default.css, quirks.css,
+# internal.css, welcome.html stb. -> közös resources) VALÓDI fájlként másolódjanak.
+rm -rf "$OUT/res"
 if [ -d "$SRC/netsurf/frontends/framebuffer/res" ]; then
-  cp -r "$SRC/netsurf/frontends/framebuffer/res" "$OUT/res"
+  cp -rL "$SRC/netsurf/frontends/framebuffer/res" "$OUT/res"
 elif [ -d "$SRC/netsurf/resources" ]; then
-  cp -r "$SRC/netsurf/resources" "$OUT/res"
+  cp -rL "$SRC/netsurf/resources" "$OUT/res"
 fi
+echo "==> res tartalom ellenőrzése (kell benne .css és welcome.html):"
+ls -1 "$OUT/res" | grep -E '\.css$|welcome' || echo "FIGYELEM: nincs css/welcome a res-ben!"
 "${CROSS}strip" "$OUT/netsurf" 2>/dev/null || true
 file "$OUT/netsurf" || true
 echo "==> KÉSZ: $OUT/netsurf"
