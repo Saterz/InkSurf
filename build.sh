@@ -145,16 +145,51 @@ if [ -f "$PREFIX/lib/pkgconfig/libcurl.pc" ]; then
   sed -i 's/^Libs:.*/& -lssl -lcrypto -lz/' "$PREFIX/lib/pkgconfig/libcurl.pc"
 fi
 
-# 2d) MIME-típus javítás: a framebuffer fetch.c az /etc/mime.types-ot olvassa, ami a
-# Kindle-en nincs (és a rendszerpartíció írásvédett). Átírjuk a forrást a saját,
-# a pluginnal szállított mime.types-unkra (a /mnt/us-on, ahol van írási jog).
-MIMEPATH="/mnt/us/koreader/plugins/webbrowser.koplugin/bin/res/mime.types"
-echo "==> mime.types útvonal átírása a forrásban -> $MIMEPATH"
-for f in "$SRC/netsurf/frontends/framebuffer/fetch.c" "$SRC/netsurf/frontends/framebuffer/findfile.c"; do
-  [ -f "$f" ] && sed -i "s#/etc/mime\\.types#$MIMEPATH#g" "$f"
-done
-echo "   ellenőrzés (mime.types hivatkozások):"
-grep -rn "mime\\.types" "$SRC/netsurf/frontends/framebuffer/" || echo "   FIGYELEM: nincs mime.types hivatkozás a forrásban!"
+# 2d) MIME-típus javítás: a framebuffer fetch_filetype rossz típust ad a .css-re,
+# ezért a stíluslapok "UnacceptableType"-pal elbuknak. Lecseréljük a függvényt egy
+# saját, kiterjesztés-alapú változatra (nem függ külső fájltól).
+echo "==> fetch_filetype lecserélése a forrásban"
+python3 - "$SRC/netsurf/frontends/framebuffer/fetch.c" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+# szükséges include-ok biztosítása
+for inc in ("<string.h>", "<strings.h>"):
+    if ("#include " + inc) not in s:
+        s = s.replace("\n", "\n#include " + inc + "\n", 1)
+m = re.search(r'const\s+char\s*\*\s*fetch_filetype\s*\([^)]*\)\s*\{', s)
+if not m:
+    print("FIGYELEM: fetch_filetype nem található!"); sys.exit(0)
+start = m.start(); j = m.end() - 1; depth = 0
+while j < len(s):
+    if s[j] == '{': depth += 1
+    elif s[j] == '}':
+        depth -= 1
+        if depth == 0: break
+    j += 1
+end = j + 1
+newfn = (
+'const char *fetch_filetype(const char *unix_path)\n'
+'{\n'
+'\tstatic const struct { const char *ext; const char *type; } nsmap[] = {\n'
+'\t\t{".css","text/css"},{".html","text/html"},{".htm","text/html"},\n'
+'\t\t{".js","text/javascript"},{".json","application/json"},\n'
+'\t\t{".png","image/png"},{".gif","image/gif"},{".jpg","image/jpeg"},\n'
+'\t\t{".jpeg","image/jpeg"},{".svg","image/svg+xml"},{".bmp","image/bmp"},\n'
+'\t\t{".txt","text/plain"},{".xml","text/xml"},{0,0}\n'
+'\t};\n'
+'\tsize_t nl = strlen(unix_path); int ni;\n'
+'\tfor (ni = 0; nsmap[ni].ext; ni++) {\n'
+'\t\tsize_t el = strlen(nsmap[ni].ext);\n'
+'\t\tif (nl >= el && strcasecmp(unix_path + nl - el, nsmap[ni].ext) == 0)\n'
+'\t\t\treturn nsmap[ni].type;\n'
+'\t}\n'
+'\treturn "text/plain";\n'
+'}'
+)
+open(p, 'w').write(s[:start] + newfn + s[end:])
+print("fetch_filetype lecserélve, hossz:", len(newfn))
+PY
 
 # 3) NetSurf, framebuffer frontend, linux felület (/dev/fb + /dev/input), JS (duktape)
 echo "==> netsurf (framebuffer)"
