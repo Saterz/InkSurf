@@ -145,6 +145,17 @@ if [ -f "$PREFIX/lib/pkgconfig/libcurl.pc" ]; then
   sed -i 's/^Libs:.*/& -lssl -lcrypto -lz/' "$PREFIX/lib/pkgconfig/libcurl.pc"
 fi
 
+# 2d) MIME-típus javítás: a framebuffer fetch.c az /etc/mime.types-ot olvassa, ami a
+# Kindle-en nincs (és a rendszerpartíció írásvédett). Átírjuk a forrást a saját,
+# a pluginnal szállított mime.types-unkra (a /mnt/us-on, ahol van írási jog).
+MIMEPATH="/mnt/us/koreader/plugins/webbrowser.koplugin/bin/res/mime.types"
+echo "==> mime.types útvonal átírása a forrásban -> $MIMEPATH"
+for f in "$SRC/netsurf/frontends/framebuffer/fetch.c" "$SRC/netsurf/frontends/framebuffer/findfile.c"; do
+  [ -f "$f" ] && sed -i "s#/etc/mime\\.types#$MIMEPATH#g" "$f"
+done
+echo "   ellenőrzés (mime.types hivatkozások):"
+grep -rn "mime\\.types" "$SRC/netsurf/frontends/framebuffer/" || echo "   FIGYELEM: nincs mime.types hivatkozás a forrásban!"
+
 # 3) NetSurf, framebuffer frontend, linux felület (/dev/fb + /dev/input), JS (duktape)
 echo "==> netsurf (framebuffer)"
 make -C "$SRC/netsurf" -j"$JOBS" \
@@ -173,8 +184,22 @@ if [ -d "$SRC/netsurf/frontends/framebuffer/res" ]; then
 elif [ -d "$SRC/netsurf/resources" ]; then
   cp -rL "$SRC/netsurf/resources" "$OUT/res"
 fi
-echo "==> res tartalom ellenőrzése (kell benne .css és welcome.html):"
-ls -1 "$OUT/res" | grep -E '\.css$|welcome' || echo "FIGYELEM: nincs css/welcome a res-ben!"
+# saját mime.types a res-be (ezt olvassa a fordításkor átírt fetch.c)
+cat > "$OUT/res/mime.types" <<'MIME'
+text/css			css
+text/html			html htm
+text/plain			txt text
+text/javascript			js
+application/json		json
+image/png			png
+image/jpeg			jpg jpeg jpe
+image/gif			gif
+image/svg+xml			svg
+image/bmp			bmp
+application/octet-stream	bin
+MIME
+echo "==> res tartalom ellenőrzése (kell benne .css, welcome.html, mime.types):"
+ls -1 "$OUT/res" | grep -E '\.css$|welcome|mime\.types' || echo "FIGYELEM: hiányzik valami a res-ből!"
 "${CROSS}strip" "$OUT/netsurf" 2>/dev/null || true
 file "$OUT/netsurf" || true
 echo "==> KÉSZ: $OUT/netsurf"
