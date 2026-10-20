@@ -118,8 +118,7 @@ tar xzf openssl.tar.gz
 ( cd "openssl-${OSSL_VER}" && \
   CROSS_COMPILE="${CROSS}" ./Configure linux-armv4 \
     --prefix="$PREFIX" --openssldir="$PREFIX/ssl" \
-    no-shared no-tests no-asm zlib \
-    --with-zlib-include="$PREFIX/include" --with-zlib-lib="$PREFIX/lib" && \
+    no-shared no-module no-legacy no-tests no-asm no-dso && \
   make -j"$JOBS" && make install_sw )
 
 echo "==> libcurl (target)"
