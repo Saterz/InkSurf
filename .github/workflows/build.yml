@@ -21,26 +21,32 @@ jobs:
             bison flex texinfo help2man gawk gperf pkg-config \
             libncurses-dev python3 unzip wget file curl rsync
 
-      - name: Toolchain gyorsitotar
-        id: tc-cache
-        uses: actions/cache@v4
+      - name: Toolchain visszatoltes (ha van)
+        id: tc-restore
+        uses: actions/cache/restore@v4
         with:
           path: ~/x-tools
           key: koxtoolchain-${{ env.KOX_TARGET }}-v2
 
-      - name: koxtoolchain epitese (ujraprobalkozassal)
-        if: steps.tc-cache.outputs.cache-hit != 'true'
+      - name: koxtoolchain epitese (ha nincs)
+        if: steps.tc-restore.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 https://github.com/Niluje/koxtoolchain ~/koxtc
           cd ~/koxtc
           ok=0
           for i in 1 2 3 4 5; do
-            echo "=== koxtoolchain probalkozas #$i ==="
+            echo "=== probalkozas #$i ==="
             if ./gen-tc.sh ${{ env.KOX_TARGET }}; then ok=1; break; fi
-            echo "Sikertelen (valoszinuleg atmeneti letoltesi hiba). Ujra 30 mp mulva..."
-            sleep 30
+            echo "sikertelen, ujra 30 mp mulva..."; sleep 30
           done
-          [ "$ok" = "1" ] || { echo "A toolchain 5 probalkozas utan sem epult meg."; exit 1; }
+          [ "$ok" = "1" ] || { echo "toolchain nem epult meg"; exit 1; }
+
+      - name: Toolchain mentese AZONNAL (ha most epult)
+        if: steps.tc-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/x-tools
+          key: koxtoolchain-${{ env.KOX_TARGET }}-v2
 
       - name: Forditó megkeresese (PATH + tuple)
         id: tuple
@@ -48,7 +54,7 @@ jobs:
           BINDIR="$(find "$HOME/x-tools" -maxdepth 2 -name bin -type d | head -n1)"
           echo "$BINDIR" >> "$GITHUB_PATH"
           TUPLE="$(basename "$(find "$BINDIR" -name '*-gcc' | head -n1)" | sed 's/-gcc$//')"
-          echo "A forditó tuple: $TUPLE"
+          echo "tuple: $TUPLE"
           echo "tuple=$TUPLE" >> "$GITHUB_OUTPUT"
 
       - name: NetSurf forditasa
