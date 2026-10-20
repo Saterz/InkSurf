@@ -8,74 +8,52 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
-    env:
-      KOX_TARGET: kindlehf
+    runs-on: ubuntu-latest
+    # Előre elkészített Kindle hard-float fordítókörnyezet (2024-es Paperwhite).
+    # Így nem kell a toolchaint építeni (azt a lépést akadt el a config.guess letöltés).
+    container:
+      image: ghcr.io/koreader/koxtoolchain:kindlehf-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build-fuggosegek
+      - name: Hiányzó eszközök (ha kellenek)
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential git autoconf automake libtool libtool-bin \
-            bison flex texinfo help2man gawk gperf pkg-config \
-            libncurses-dev python3 unzip wget file curl rsync
+          # az image már tartalmazza a fordítót; a NetSurf-hez kellhet még pár apróság
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update || true
+            apt-get install -y --no-install-recommends git file pkg-config python3 unzip wget curl rsync ca-certificates || true
+          fi
 
-      - name: Toolchain visszatoltes (ha van)
-        id: tc-restore
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/x-tools
-          key: koxtoolchain-${{ env.KOX_TARGET }}-v2
-
-      - name: koxtoolchain epitese (ha nincs)
-        if: steps.tc-restore.outputs.cache-hit != 'true'
+      - name: Fordító megkeresése (PATH + tuple)
+        id: tc
+        shell: bash
         run: |
-          git clone --depth 1 https://github.com/Niluje/koxtoolchain ~/koxtc
-          cd ~/koxtc
-          # a savannah-rol toltott config.sub/config.guess helyett GitHub-tukor
-          seed() {
-            for d in $(find "$HOME/koxtc" -type d -name scripts 2>/dev/null); do
-              curl -fsSL -o "$d/config.sub"   'https://raw.githubusercontent.com/gcc-mirror/gcc/master/config.sub'   2>/dev/null || true
-              curl -fsSL -o "$d/config.guess" 'https://raw.githubusercontent.com/gcc-mirror/gcc/master/config.guess' 2>/dev/null || true
-            done
-          }
-          ok=0
-          for i in 1 2 3 4 5 6; do
-            echo "=== probalkozas #$i ==="
-            if ./gen-tc.sh ${{ env.KOX_TARGET }}; then ok=1; break; fi
-            echo "sikertelen; config.sub/guess potlasa tukorbol, ujra 20 mp mulva..."
-            seed
-            sleep 20
-          done
-          [ "$ok" = "1" ] || { echo "toolchain nem epult meg"; exit 1; }
-
-      - name: Toolchain mentese AZONNAL (ha most epult)
-        if: steps.tc-restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/x-tools
-          key: koxtoolchain-${{ env.KOX_TARGET }}-v2
-
-      - name: Forditó megkeresese (PATH + tuple)
-        id: tuple
-        run: |
-          BINDIR="$(find "$HOME/x-tools" -maxdepth 2 -name bin -type d | head -n1)"
+          set -e
+          GCC="$(find / -name '*kindlehf*-gcc' -type f 2>/dev/null | head -n1)"
+          if [ -z "$GCC" ]; then
+            GCC="$(find / -name 'arm-*-linux-gnueabihf-gcc' -type f 2>/dev/null | head -n1)"
+          fi
+          test -n "$GCC"   # ha itt elhasal, a konténer-címke rossz – írd meg a naplót
+          BINDIR="$(dirname "$GCC")"
+          TUPLE="$(basename "$GCC" | sed 's/-gcc$//')"
+          echo "Fordító: $GCC"
+          echo "Tuple:   $TUPLE"
           echo "$BINDIR" >> "$GITHUB_PATH"
-          TUPLE="$(basename "$(find "$BINDIR" -name '*-gcc' | head -n1)" | sed 's/-gcc$//')"
-          echo "tuple: $TUPLE"
           echo "tuple=$TUPLE" >> "$GITHUB_OUTPUT"
 
-      - name: NetSurf forditasa
+      - name: NetSurf fordítása
+        shell: bash
         run: |
           chmod +x build.sh
-          TARGET_TUPLE="${{ steps.tuple.outputs.tuple }}" JOBS="$(nproc)" ./build.sh
+          TARGET_TUPLE="${{ steps.tc.outputs.tuple }}" JOBS="$(nproc)" ./build.sh
 
-      - name: Eredmeny feltoltese
+      - name: Eredmény feltöltése
         uses: actions/upload-artifact@v4
         with:
           name: netsurf-kindle
           path: |
             out/netsurf
+            out/fbink
             out/res/**
           if-no-files-found: error
