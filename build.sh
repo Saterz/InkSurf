@@ -118,7 +118,7 @@ tar xzf openssl.tar.gz
 ( cd "openssl-${OSSL_VER}" && \
   CROSS_COMPILE="${CROSS}" ./Configure linux-armv4 \
     --prefix="$PREFIX" --openssldir="$PREFIX/ssl" \
-    no-shared no-tests no-docs no-asm zlib \
+    no-shared no-tests no-asm zlib \
     --with-zlib-include="$PREFIX/include" --with-zlib-lib="$PREFIX/lib" && \
   make -j"$JOBS" && make install_sw )
 
