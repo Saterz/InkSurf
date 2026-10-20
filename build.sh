@@ -92,6 +92,58 @@ for lib in $TARGET_LIBS; do
   tmake "$lib" install
 done
 
+# 2c) Hálózati réteg: zlib + openssl + libcurl (statikusan, a prefixünkbe)
+fetch() {
+  local out="$1" url="$2"
+  for i in 1 2 3 4; do
+    curl -fSL --retry 3 --retry-delay 5 -o "$out" "$url" && return 0
+    echo "letöltés újra ($i): $url"; sleep 10
+  done
+  echo "HIBA: nem sikerült letölteni: $url"; exit 1
+}
+
+echo "==> zlib (target)"
+ZLIB_VER=1.3.1
+fetch zlib.tar.gz "https://github.com/madler/zlib/releases/download/v${ZLIB_VER}/zlib-${ZLIB_VER}.tar.gz"
+tar xzf zlib.tar.gz
+( cd "zlib-${ZLIB_VER}" && \
+  CC="${CROSS}gcc" AR="${CROSS}ar" RANLIB="${CROSS}ranlib" \
+    ./configure --prefix="$PREFIX" --static && \
+  make -j"$JOBS" && make install )
+
+echo "==> openssl (target)"
+OSSL_VER=3.0.15
+fetch openssl.tar.gz "https://github.com/openssl/openssl/releases/download/openssl-${OSSL_VER}/openssl-${OSSL_VER}.tar.gz"
+tar xzf openssl.tar.gz
+( cd "openssl-${OSSL_VER}" && \
+  CROSS_COMPILE="${CROSS}" ./Configure linux-armv4 \
+    --prefix="$PREFIX" --openssldir="$PREFIX/ssl" \
+    no-shared no-tests no-docs no-asm zlib \
+    --with-zlib-include="$PREFIX/include" --with-zlib-lib="$PREFIX/lib" && \
+  make -j"$JOBS" && make install_sw )
+
+echo "==> libcurl (target)"
+CURL_VER=8.11.0
+CURL_TAG="curl-$(echo "$CURL_VER" | tr '.' '_')"
+fetch curl.tar.gz "https://github.com/curl/curl/releases/download/${CURL_TAG}/curl-${CURL_VER}.tar.gz"
+tar xzf curl.tar.gz
+( cd "curl-${CURL_VER}" && \
+  ./configure --host="$TARGET_TUPLE" --prefix="$PREFIX" \
+    --disable-shared --enable-static \
+    --with-openssl="$PREFIX" --with-zlib="$PREFIX" \
+    --without-libpsl --without-libidn2 --without-brotli --without-zstd \
+    --without-nghttp2 --without-ngtcp2 --disable-ldap --disable-ldaps \
+    --disable-manual --disable-docs \
+    CC="${CROSS}gcc" AR="${CROSS}ar" RANLIB="${CROSS}ranlib" \
+    PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" && \
+  make -j"$JOBS" && make install )
+
+# a statikus linkeléshez a libcurl.pc-be beleírjuk a privát függőségeket is,
+# hogy a NetSurf linkelésénél meglegyen az -lssl -lcrypto -lz
+if [ -f "$PREFIX/lib/pkgconfig/libcurl.pc" ]; then
+  sed -i 's/^Libs:.*/& -lssl -lcrypto -lz/' "$PREFIX/lib/pkgconfig/libcurl.pc"
+fi
+
 # 3) NetSurf, framebuffer frontend, linux felület (/dev/fb + /dev/input), JS (duktape)
 echo "==> netsurf (framebuffer)"
 make -C "$SRC/netsurf" -j"$JOBS" \
