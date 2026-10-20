@@ -226,6 +226,23 @@ make -C "$SRC/netsurf" -j"$JOBS" \
   NETSURF_USE_ROSPRITE=NO NETSURF_USE_NSSVG=NO NETSURF_USE_VIDEO=NO \
   NETSURF_USE_HARU_PDF=NO NETSURF_USE_CURL=YES NETSURF_USE_OPENSSL=YES
 
+# 4) FBInk – a Kindle e-ink frissítéséhez (MTK EPDC). Ezzel rajzolás után kényszerítjük
+#    a kijelzőt, hogy megjelenjen, amit a NetSurf a framebufferbe írt.
+echo "==> FBInk (Kindle e-ink)"
+if [ ! -d "$ROOT/FBInk" ]; then
+  git clone --depth 1 --recursive https://github.com/NiLuJe/FBInk.git "$ROOT/FBInk" || true
+fi
+if [ -d "$ROOT/FBInk" ]; then
+  ( cd "$ROOT/FBInk" && \
+    export CROSS_TC="$TARGET_TUPLE" && \
+    export PATH="$(dirname "$REALGCC"):$PATH" && \
+    make clean >/dev/null 2>&1 || true; \
+    make kindle -j"$JOBS" ) && \
+  FBINK_BIN="$(find "$ROOT/FBInk" -name fbink -type f -perm -u+x | head -n1 || true)" && \
+  [ -n "$FBINK_BIN" ] && cp "$FBINK_BIN" "$OUT/fbink" && "${CROSS}strip" "$OUT/fbink" 2>/dev/null || true
+fi
+[ -f "$OUT/fbink" ] && echo "   fbink kész: $(file "$OUT/fbink" | cut -c1-50)" || echo "   FIGYELEM: fbink nem épült meg (a NetSurf attól még kész)"
+
 echo "==> kimenet összeállítása"
 BIN="$(find "$SRC/netsurf" -maxdepth 2 -name 'nsfb' -type f | head -n1 || true)"
 [ -n "$BIN" ] || BIN="$(find "$SRC/netsurf" -maxdepth 2 -name 'netsurf' -type f -perm -u+x | head -n1 || true)"
