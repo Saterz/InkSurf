@@ -1,6 +1,5 @@
 name: NetSurf Kindle build
 
-# Kézi indítás a GitHub "Actions" fülén (Run workflow), vagy push a main-re.
 on:
   workflow_dispatch:
   push:
@@ -9,56 +8,41 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
-    env:
-      # 2024-es Paperwhite (12. gen): a legújabb, hard-float Kindle cél.
-      # Ha a toolchain nem ezt a nevet adja, a "Toolchain tuple" lépés kiírja a helyeset.
-      KOX_TARGET: kindlehf
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/koreader/koxtoolchain:kindlehf-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build-függőségek
+      - name: Hianyzo eszkozok
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential git autoconf automake libtool libtool-bin \
-            bison flex texinfo help2man gawk gperf pkg-config \
-            ncurses-dev python3 unzip wget file curl rsync
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update || true
+            apt-get install -y --no-install-recommends git file pkg-config python3 unzip wget curl rsync ca-certificates || true
+          fi
 
-      # A Kindle-fordító (koxtoolchain) megépítése lassú (~30-60 perc), ezért gyorsítótárazzuk.
-      - name: Toolchain gyorsítótár
-        id: tc-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/x-tools
-          key: koxtoolchain-${{ env.KOX_TARGET }}-v1
-
-      - name: koxtoolchain építése (ha nincs gyorsítótárban)
-        if: steps.tc-cache.outputs.cache-hit != 'true'
+      - name: Forditó megkeresese
+        id: tc
+        shell: bash
         run: |
-          git clone --depth 1 https://github.com/Niluje/koxtoolchain ~/koxtc
-          cd ~/koxtc
-          # a gen-tc.sh minden függőséget letölt és lefordít a megadott célra
-          ./gen-tc.sh ${{ env.KOX_TARGET }}
+          set -e
+          GCC="$(find / -name '*kindlehf*-gcc' -type f 2>/dev/null | head -n1)"
+          [ -n "$GCC" ] || GCC="$(find / -name 'arm-*-linux-gnueabihf-gcc' -type f 2>/dev/null | head -n1)"
+          test -n "$GCC"
+          echo "$(dirname "$GCC")" >> "$GITHUB_PATH"
+          echo "tuple=$(basename "$GCC" | sed 's/-gcc$//')" >> "$GITHUB_OUTPUT"
 
-      - name: Toolchain tuple megállapítása
-        id: tuple
-        run: |
-          BINDIR="$(find "$HOME/x-tools" -maxdepth 2 -name bin -type d | head -n1)"
-          echo "PATH-hoz: $BINDIR"
-          echo "$BINDIR" >> "$GITHUB_PATH"
-          TUPLE="$(basename "$(find "$BINDIR" -name '*-gcc' | head -n1)" | sed 's/-gcc$//')"
-          echo "A fordító tuple: $TUPLE"
-          echo "tuple=$TUPLE" >> "$GITHUB_OUTPUT"
-
-      - name: NetSurf fordítása
+      - name: NetSurf forditasa
+        shell: bash
         run: |
           chmod +x build.sh
-          TARGET_TUPLE="${{ steps.tuple.outputs.tuple }}" JOBS="$(nproc)" ./build.sh
+          TARGET_TUPLE="${{ steps.tc.outputs.tuple }}" JOBS="$(nproc)" ./build.sh
 
-      - name: Eredmény feltöltése
+      - name: Eredmeny feltoltese
         uses: actions/upload-artifact@v4
         with:
-          name: netsurf-kindle-${{ env.KOX_TARGET }}
+          name: netsurf-kindle
           path: |
             out/netsurf
             out/res/**
