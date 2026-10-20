@@ -33,11 +33,20 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/Niluje/koxtoolchain ~/koxtc
           cd ~/koxtc
+          # a savannah-rol toltott config.sub/config.guess helyett GitHub-tukor
+          seed() {
+            for d in $(find "$HOME/koxtc" -type d -name scripts 2>/dev/null); do
+              curl -fsSL -o "$d/config.sub"   'https://raw.githubusercontent.com/gcc-mirror/gcc/master/config.sub'   2>/dev/null || true
+              curl -fsSL -o "$d/config.guess" 'https://raw.githubusercontent.com/gcc-mirror/gcc/master/config.guess' 2>/dev/null || true
+            done
+          }
           ok=0
-          for i in 1 2 3 4 5; do
+          for i in 1 2 3 4 5 6; do
             echo "=== probalkozas #$i ==="
             if ./gen-tc.sh ${{ env.KOX_TARGET }}; then ok=1; break; fi
-            echo "sikertelen, ujra 30 mp mulva..."; sleep 30
+            echo "sikertelen; config.sub/guess potlasa tukorbol, ujra 20 mp mulva..."
+            seed
+            sleep 20
           done
           [ "$ok" = "1" ] || { echo "toolchain nem epult meg"; exit 1; }
 
