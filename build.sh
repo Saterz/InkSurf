@@ -44,6 +44,25 @@ TGT_NSSHARED="$PREFIX/share/netsurf-buildsystem"
 echo "==> nsgenbind (host, natív)"
 make -C "$SRC/nsgenbind" PREFIX="$HOSTPREFIX" NSSHARED="$HOST_NSSHARED" install
 
+# 2b) expat – a libdom XML-kötéséhez kell, keresztfordítva a prefixünkbe (statikus)
+EXPAT_VER="${EXPAT_VER:-2.6.4}"
+EXPAT_TAG="R_$(echo "$EXPAT_VER" | tr '.' '_')"
+echo "==> expat ${EXPAT_VER} (target, statikus)"
+ok=0
+for i in 1 2 3; do
+  if curl -fSL -o expat.tar.gz \
+      "https://github.com/libexpat/libexpat/releases/download/${EXPAT_TAG}/expat-${EXPAT_VER}.tar.gz"; then ok=1; break; fi
+  echo "expat letöltés #$i sikertelen, újra 10 mp..."; sleep 10
+done
+[ "$ok" = "1" ] || { echo "HIBA: expat letöltése nem sikerült"; exit 1; }
+tar xzf expat.tar.gz
+( cd "expat-${EXPAT_VER}" && \
+  ./configure --host="$TARGET_TUPLE" --prefix="$PREFIX" \
+      --enable-static --disable-shared \
+      --without-docbook --without-examples --without-tests \
+      CC="${CROSS}gcc" AR="${CROSS}ar" RANLIB="${CROSS}ranlib" && \
+  make -j"$JOBS" && make install )
+
 export CFLAGS="-I$PREFIX/include -O2"
 export LDFLAGS="-L$PREFIX/lib"
 export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
