@@ -149,18 +149,35 @@ fi
 # ezért a stíluslapok "UnacceptableType"-pal elbuknak. Lecseréljük a függvényt egy
 # saját, kiterjesztés-alapú változatra (nem függ külső fájltól).
 echo "==> fetch_filetype lecserélése a forrásban"
-python3 - "$SRC/netsurf/frontends/framebuffer/fetch.c" <<'PY'
+cat > "$ROOT/patcher.py" <<'PY'
 import re, sys
 p = sys.argv[1]
 s = open(p).read()
-# szükséges include-ok biztosítása
+def ensure_inc(s, inc):
+    if ("#include " + inc) in s: return s
+    m = re.search(r'^#include[^\n]*\n', s, re.M)
+    return (s[:m.end()] + "#include " + inc + "\n" + s[m.end():]) if m else ("#include " + inc + "\n" + s)
 for inc in ("<string.h>", "<strings.h>"):
-    if ("#include " + inc) not in s:
-        s = s.replace("\n", "\n#include " + inc + "\n", 1)
-m = re.search(r'const\s+char\s*\*\s*fetch_filetype\s*\([^)]*\)\s*\{', s)
-if not m:
-    print("FIGYELEM: fetch_filetype nem található!"); sys.exit(0)
-start = m.start(); j = m.end() - 1; depth = 0
+    s = ensure_inc(s, inc)
+lines = s.split('\n')
+defidx = None
+for i, l in enumerate(lines):
+    if ('fetch_filetype' in l and '(' in l and ';' not in l
+            and 'NSLOG' not in l and 'LOG(' not in l and 'define' not in l):
+        defidx = i; break
+if defidx is None:
+    sys.stderr.write("PATCH-HIBA: fetch_filetype definíció nem található\n"); sys.exit(2)
+startline = defidx; k = defidx - 1
+while k >= 0:
+    prev = lines[k].strip()
+    if prev == "": k -= 1; continue
+    if (prev.endswith('*') or prev in ('const char *','static const char *','char *')) \
+            and ';' not in prev and '{' not in prev and '}' not in prev:
+        startline = k; k -= 1; continue
+    break
+start = sum(len(lines[i]) + 1 for i in range(startline))
+rest_off = sum(len(lines[i]) + 1 for i in range(defidx))
+b = s.index('{', rest_off); depth = 0; j = b
 while j < len(s):
     if s[j] == '{': depth += 1
     elif s[j] == '}':
@@ -168,6 +185,7 @@ while j < len(s):
         if depth == 0: break
     j += 1
 end = j + 1
+sys.stderr.write("EREDETI fetch_filetype:\n" + s[start:end] + "\n--- vége ---\n")
 newfn = (
 'const char *fetch_filetype(const char *unix_path)\n'
 '{\n'
@@ -188,8 +206,11 @@ newfn = (
 '}'
 )
 open(p, 'w').write(s[:start] + newfn + s[end:])
-print("fetch_filetype lecserélve, hossz:", len(newfn))
+sys.stderr.write("fetch_filetype LECSERÉLVE.\n")
 PY
+python3 "$ROOT/patcher.py" "$SRC/netsurf/frontends/framebuffer/fetch.c"
+grep -q "nsmap" "$SRC/netsurf/frontends/framebuffer/fetch.c" \
+  || { echo "HIBA: a fetch_filetype csere nem sikerült"; exit 1; }
 
 # 3) NetSurf, framebuffer frontend, linux felület (/dev/fb + /dev/input), JS (duktape)
 echo "==> netsurf (framebuffer)"
