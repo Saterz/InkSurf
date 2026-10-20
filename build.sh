@@ -43,6 +43,8 @@ TGT_NSSHARED="$PREFIX/share/netsurf-buildsystem"
 # 2) nsgenbind – a BUILD gépen fut (JS-kötések), natív fordítóval
 echo "==> nsgenbind (host, natív)"
 make -C "$SRC/nsgenbind" PREFIX="$HOSTPREFIX" NSSHARED="$HOST_NSSHARED" install
+# a netsurf Makefile bare néven hívja a nsgenbind-ot -> legyen a PATH-on
+export PATH="$HOSTPREFIX/bin:$PATH"
 
 # 2b) expat – a libdom XML-kötéséhez kell, keresztfordítva a prefixünkbe (statikus)
 EXPAT_VER="${EXPAT_VER:-2.6.4}"
