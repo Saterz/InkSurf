@@ -8,36 +8,53 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/koreader/koxtoolchain:kindlehf-latest
+    runs-on: ubuntu-22.04
+    env:
+      KOX_TARGET: kindlehf
     steps:
       - uses: actions/checkout@v4
 
-      - name: Hianyzo eszkozok
-        shell: bash
+      - name: Build-fuggosegek
         run: |
-          if command -v apt-get >/dev/null 2>&1; then
-            apt-get update || true
-            apt-get install -y --no-install-recommends git file pkg-config python3 unzip wget curl rsync ca-certificates || true
-          fi
+          sudo apt-get update
+          sudo apt-get install -y build-essential git autoconf automake libtool libtool-bin \
+            bison flex texinfo help2man gawk gperf pkg-config \
+            libncurses-dev python3 unzip wget file curl rsync
 
-      - name: Forditó megkeresese
-        id: tc
-        shell: bash
+      - name: Toolchain gyorsitotar
+        id: tc-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/x-tools
+          key: koxtoolchain-${{ env.KOX_TARGET }}-v2
+
+      - name: koxtoolchain epitese (ujraprobalkozassal)
+        if: steps.tc-cache.outputs.cache-hit != 'true'
         run: |
-          set -e
-          GCC="$(find / -name '*kindlehf*-gcc' -type f 2>/dev/null | head -n1)"
-          [ -n "$GCC" ] || GCC="$(find / -name 'arm-*-linux-gnueabihf-gcc' -type f 2>/dev/null | head -n1)"
-          test -n "$GCC"
-          echo "$(dirname "$GCC")" >> "$GITHUB_PATH"
-          echo "tuple=$(basename "$GCC" | sed 's/-gcc$//')" >> "$GITHUB_OUTPUT"
+          git clone --depth 1 https://github.com/Niluje/koxtoolchain ~/koxtc
+          cd ~/koxtc
+          ok=0
+          for i in 1 2 3 4 5; do
+            echo "=== koxtoolchain probalkozas #$i ==="
+            if ./gen-tc.sh ${{ env.KOX_TARGET }}; then ok=1; break; fi
+            echo "Sikertelen (valoszinuleg atmeneti letoltesi hiba). Ujra 30 mp mulva..."
+            sleep 30
+          done
+          [ "$ok" = "1" ] || { echo "A toolchain 5 probalkozas utan sem epult meg."; exit 1; }
+
+      - name: Forditó megkeresese (PATH + tuple)
+        id: tuple
+        run: |
+          BINDIR="$(find "$HOME/x-tools" -maxdepth 2 -name bin -type d | head -n1)"
+          echo "$BINDIR" >> "$GITHUB_PATH"
+          TUPLE="$(basename "$(find "$BINDIR" -name '*-gcc' | head -n1)" | sed 's/-gcc$//')"
+          echo "A forditó tuple: $TUPLE"
+          echo "tuple=$TUPLE" >> "$GITHUB_OUTPUT"
 
       - name: NetSurf forditasa
-        shell: bash
         run: |
           chmod +x build.sh
-          TARGET_TUPLE="${{ steps.tc.outputs.tuple }}" JOBS="$(nproc)" ./build.sh
+          TARGET_TUPLE="${{ steps.tuple.outputs.tuple }}" JOBS="$(nproc)" ./build.sh
 
       - name: Eredmeny feltoltese
         uses: actions/upload-artifact@v4
