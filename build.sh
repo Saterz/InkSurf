@@ -607,6 +607,80 @@ if [ -f "$PREFIX/lib/pkgconfig/libcurl.pc" ]; then
   sed -i 's/^Libs:.*/& -lssl -lcrypto -lz/' "$PREFIX/lib/pkgconfig/libcurl.pc"
 fi
 
+# 2e) FreeType – rendes (TTF) betűkhöz, hogy a magyar ő, a cirill stb. is megjelenjen,
+#     és a szöveg élsimított legyen (a beépített bittérképes font helyett).
+FT_VER="2.13.3"
+echo "==> freetype ${FT_VER} (target, statikus)"
+ok=0
+for url in \
+  "https://download.savannah.gnu.org/releases/freetype/freetype-${FT_VER}.tar.gz" \
+  "https://downloads.sourceforge.net/freetype/freetype-${FT_VER}.tar.gz" \
+  "https://downloads.sourceforge.net/project/freetype/freetype2/${FT_VER}/freetype-${FT_VER}.tar.gz" ; do
+  echo "   freetype letöltés: $url"
+  if curl -fSL --retry 3 -o freetype.tar.gz "$url"; then ok=1; break; fi
+  sleep 5
+done
+[ "$ok" = "1" ] || { echo "HIBA: freetype letöltése nem sikerült"; exit 1; }
+tar xzf freetype.tar.gz
+( cd "freetype-${FT_VER}" && \
+  ./configure --host="$TARGET_TUPLE" --prefix="$PREFIX" \
+    --enable-static --disable-shared \
+    --without-zlib --without-bzip2 --without-png --without-harfbuzz --without-brotli && \
+  make -j"$JOBS" && make install )
+[ -f "$PREFIX/lib/pkgconfig/freetype2.pc" ] || { echo "HIBA: freetype2.pc hiányzik"; exit 1; }
+echo "   freetype2.pc rendben"
+
+# 2f) libpng – a PNG képekhez (a NetSurf pkg-configgal keresi). zlib-re épül.
+PNG_VER="1.6.44"
+echo "==> libpng ${PNG_VER} (target, statikus)"
+ok=0
+for url in \
+  "https://downloads.sourceforge.net/project/libpng/libpng16/${PNG_VER}/libpng-${PNG_VER}.tar.gz" \
+  "https://downloads.sourceforge.net/libpng/libpng-${PNG_VER}.tar.gz" ; do
+  echo "   libpng letöltés: $url"
+  if curl -fSL --retry 3 -o libpng.tar.gz "$url"; then ok=1; break; fi
+  sleep 5
+done
+[ "$ok" = "1" ] || { echo "HIBA: libpng letöltése nem sikerült"; exit 1; }
+tar xzf libpng.tar.gz
+( cd "libpng-${PNG_VER}" && \
+  ./configure --host="$TARGET_TUPLE" --prefix="$PREFIX" \
+    --enable-static --disable-shared \
+    CPPFLAGS="-I$PREFIX/include" LDFLAGS="-L$PREFIX/lib" && \
+  make -j"$JOBS" && make install )
+[ -f "$PREFIX/lib/pkgconfig/libpng.pc" ] || { echo "HIBA: libpng.pc hiányzik"; exit 1; }
+# statikus linkeléshez a png mellé a zlib és -lm is kelljen
+sed -i 's/^Libs:.*/& -lz -lm/' "$PREFIX/lib/pkgconfig/libpng.pc"
+echo "   libpng.pc rendben"
+
+# 2g) libjpeg (IJG) – a JPEG képekhez (pl. könyvborítók). Best-effort: ha nem megy,
+#     a build JPEG nélkül folytatódik (PNG akkor is lesz).
+JPEG_OK=0
+JPEG_VER="9f"
+echo "==> libjpeg (IJG v${JPEG_VER}, target, statikus)"
+ok=0
+for url in \
+  "https://www.ijg.org/files/jpegsrc.v${JPEG_VER}.tar.gz" \
+  "http://www.ijg.org/files/jpegsrc.v${JPEG_VER}.tar.gz" ; do
+  echo "   libjpeg letöltés: $url"
+  if curl -fSL --retry 3 -o jpeg.tar.gz "$url"; then ok=1; break; fi
+  sleep 5
+done
+if [ "$ok" = "1" ] && tar xzf jpeg.tar.gz 2>/dev/null; then
+  if ( cd "jpeg-${JPEG_VER}" && \
+       ./configure --host="$TARGET_TUPLE" --prefix="$PREFIX" \
+         --enable-static --disable-shared && \
+       make -j"$JOBS" && make install ); then
+    [ -f "$PREFIX/include/jpeglib.h" ] && JPEG_OK=1
+  fi
+fi
+if [ "$JPEG_OK" = "1" ]; then echo "   libjpeg kész (JPEG be)"; else echo "   FIGYELEM: libjpeg kimaradt (csak PNG lesz)"; fi
+
+# a NetSurf a -ljpeg-et pkg-config nélkül adja hozzá, ezért a fordító keresési útjába
+# tesszük a prefixünket (a png-t pkg-config amúgy is megtalálja)
+export CPATH="$PREFIX/include${CPATH:+:$CPATH}"
+export LIBRARY_PATH="$PREFIX/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+
 # 2d) MIME-típus javítás: a framebuffer fetch_filetype rossz típust ad a .css-re,
 # ezért a stíluslapok "UnacceptableType"-pal elbuknak. Lecseréljük a függvényt egy
 # saját, kiterjesztés-alapú változatra (nem függ külső fájltól).
@@ -682,9 +756,11 @@ make -C "$SRC/netsurf" -j"$JOBS" \
   NSGENBIND="$HOSTPREFIX/bin/nsgenbind" \
   TARGET=framebuffer \
   NETSURF_FB_FRONTEND=linux \
-  NETSURF_FB_FONTLIB=internal \
+  NETSURF_FB_FONTLIB=freetype \
+  PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" \
   NETSURF_USE_DUKTAPE=YES \
-  NETSURF_USE_JPEG=NO NETSURF_USE_PNG=NO NETSURF_USE_WEBP=NO \
+  NETSURF_USE_JPEG=$([ "$JPEG_OK" = "1" ] && echo YES || echo NO) \
+  NETSURF_USE_PNG=YES NETSURF_USE_WEBP=NO \
   NETSURF_USE_ROSPRITE=NO NETSURF_USE_NSSVG=NO NETSURF_USE_VIDEO=NO \
   NETSURF_USE_HARU_PDF=NO NETSURF_USE_CURL=YES NETSURF_USE_OPENSSL=YES
 
@@ -719,6 +795,28 @@ if [ -d "$SRC/netsurf/frontends/framebuffer/res" ]; then
 elif [ -d "$SRC/netsurf/resources" ]; then
   cp -rL "$SRC/netsurf/resources" "$OUT/res"
 fi
+# DejaVu TTF betűk a res/fonts alá (ezekből tölt a freetype backend: magyar ő, cirill, görög)
+echo "==> DejaVu betűk letöltése"
+DEJAVU_VER="2.37"
+ok=0
+for url in \
+  "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-${DEJAVU_VER}.tar.bz2" \
+  "https://downloads.sourceforge.net/project/dejavu/dejavu/${DEJAVU_VER}/dejavu-fonts-ttf-${DEJAVU_VER}.tar.bz2" ; do
+  echo "   DejaVu letöltés: $url"
+  if curl -fSL --retry 3 -o dejavu.tar.bz2 "$url"; then ok=1; break; fi
+  sleep 5
+done
+[ "$ok" = "1" ] || { echo "HIBA: DejaVu letöltése nem sikerült"; exit 1; }
+tar xjf dejavu.tar.bz2
+DEJAVU_DIR="$(find "$ROOT" -maxdepth 2 -type d -name 'dejavu-fonts-ttf-*' | head -n1)/ttf"
+mkdir -p "$OUT/res/fonts"
+for f in DejaVuSans.ttf DejaVuSans-Bold.ttf DejaVuSans-Oblique.ttf \
+         DejaVuSans-BoldOblique.ttf DejaVuSerif.ttf DejaVuSerif-Bold.ttf \
+         DejaVuSansMono.ttf DejaVuSansMono-Bold.ttf ; do
+  cp -f "$DEJAVU_DIR/$f" "$OUT/res/fonts/$f" || { echo "HIBA: $f hiányzik"; exit 1; }
+done
+echo "   DejaVu betűk a res/fonts alatt:"; ls -1 "$OUT/res/fonts"
+
 # saját mime.types a res-be (ezt olvassa a fordításkor átírt fetch.c)
 cat > "$OUT/res/mime.types" <<'MIME'
 text/css			css
