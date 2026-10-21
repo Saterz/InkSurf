@@ -829,6 +829,120 @@ sed -i 's/fbtk_get_height(root) - wh, 0, wh, 0xff202020/fbtk_get_height(root) - 
   "$SRC/netsurf/frontends/framebuffer/fbtk/osk.c" || true
 echo "   OSK háttér fehérre állítva:"; grep -n "0xffffffff" "$SRC/netsurf/frontends/framebuffer/fbtk/osk.c" | head -1 || true
 
+# 2k) Szövegmezőre koppintva jöjjön fel MAGÁTÓL a billentyűzet (map_osk a text_input_click-ben)
+python3 - "$SRC/netsurf/frontends/framebuffer/fbtk/text.c" <<'PYOSK'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+# a text_input_click függvényben a redraw után hívjuk meg a map_osk()-t
+anchor = "\tfbtk_request_redraw(widget);\n\n\treturn 0;\n}"
+m = s.find("text_input_click")
+if m != -1:
+    i = s.find(anchor, m)
+    if i != -1:
+        s = s[:i] + "\tfbtk_request_redraw(widget);\n\n\tmap_osk();\n\n\treturn 0;\n}" + s[i+len(anchor):]
+        open(p, "w").write(s)
+        sys.stderr.write("map_osk beszurva a text_input_click-be\n")
+    else:
+        sys.stderr.write("FIGYELEM: a text_input_click horgony nem talalhato (kihagyva)\n")
+else:
+    sys.stderr.write("FIGYELEM: text_input_click nem talalhato (kihagyva)\n")
+PYOSK
+grep -q "map_osk();" "$SRC/netsurf/frontends/framebuffer/fbtk/text.c" && echo "   auto-billentyűzet patch OK" || echo "   (auto-billentyűzet patch kimaradt)"
+
+# 2l) LETÖLTÉS-KEZELŐ a framebuffer frontendhez (hiányzik belőle): fájlba menti a
+#     letöltött fájlt a NETSURF_DOWNLOAD_DIR mappába, és a NETSURF_DL_LIST listába írja.
+python3 - "$SRC/netsurf/frontends/framebuffer/gui.c" <<'PYDL'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+block = r'''
+/* ===== Kindle: fajlba mento letoltes (a fb frontendbol hianyzik) ===== */
+#include "netsurf/download.h"
+#include "desktop/download.h"
+struct gui_download_window { FILE *kf; char kpath[1024]; download_context *kctx; };
+static struct gui_download_window *
+fb_kindle_download_create(download_context *ctx, struct gui_window *parent)
+{
+	const char *dir = getenv("NETSURF_DOWNLOAD_DIR");
+	const char *fn = download_context_get_filename(ctx);
+	struct gui_download_window *dw;
+	char name[512];
+	char cmd[1200];
+	char *p;
+	(void) parent;
+	if (dir == NULL || dir[0] == 0) dir = "/mnt/us/documents/Downloads";
+	if (fn != NULL && fn[0] != 0) { strncpy(name, fn, sizeof(name) - 1); name[sizeof(name) - 1] = 0; }
+	else { snprintf(name, sizeof(name), "letoltes-%ld", (long) time(NULL)); }
+	for (p = name; *p != 0; p++) { if (*p == '/' || *p == '\\') *p = '_'; }
+	dw = calloc(1, sizeof(*dw));
+	if (dw == NULL) return NULL;
+	dw->kctx = ctx;
+	snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\" 2>/dev/null", dir);
+	if (system(cmd) == -1) { /* ignore */ }
+	snprintf(dw->kpath, sizeof(dw->kpath), "%s/%s", dir, name);
+	dw->kf = fopen(dw->kpath, "wb");
+	if (dw->kf == NULL) { free(dw); return NULL; }
+	NSLOG(netsurf, INFO, "Kindle download -> %s", dw->kpath);
+	return dw;
+}
+static nserror
+fb_kindle_download_data(struct gui_download_window *dw, const char *data, unsigned int size)
+{
+	if (dw != NULL && dw->kf != NULL && size > 0) {
+		if (fwrite(data, 1, size, dw->kf) != size) return NSERROR_SAVE_FAILED;
+	}
+	return NSERROR_OK;
+}
+static void
+fb_kindle_download_error(struct gui_download_window *dw, const char *error_msg)
+{
+	NSLOG(netsurf, INFO, "Kindle download error: %s", error_msg ? error_msg : "?");
+	if (dw != NULL) { if (dw->kf != NULL) fclose(dw->kf); download_context_destroy(dw->kctx); free(dw); }
+}
+static void
+fb_kindle_download_done(struct gui_download_window *dw)
+{
+	const char *listf;
+	if (dw == NULL) return;
+	if (dw->kf != NULL) fclose(dw->kf);
+	NSLOG(netsurf, INFO, "Kindle download done: %s", dw->kpath);
+	listf = getenv("NETSURF_DL_LIST");
+	if (listf != NULL && listf[0] != 0) {
+		FILE *lf = fopen(listf, "a");
+		if (lf != NULL) { fputs(dw->kpath, lf); fputc('\n', lf); fclose(lf); }
+	}
+	download_context_destroy(dw->kctx);
+	free(dw);
+}
+static struct gui_download_table framebuffer_download_table = {
+	.create = fb_kindle_download_create,
+	.data = fb_kindle_download_data,
+	.error = fb_kindle_download_error,
+	.done = fb_kindle_download_done,
+};
+/* ===== Kindle letoltes vege ===== */
+
+'''
+anchor = "\t.quit = gui_quit,\n};\n"
+i = s.find(anchor)
+if i == -1:
+    sys.stderr.write("DL-PATCH HIBA: misc_table horgony nem talalhato\n"); sys.exit(2)
+i += len(anchor)
+s = s[:i] + block + s[i:]
+# a tablaba bejegyezzuk a letoltest
+tbl = "\t\t.fetch = framebuffer_fetch_table,\n"
+j = s.find(tbl)
+if j == -1:
+    sys.stderr.write("DL-PATCH HIBA: framebuffer_table horgony nem talalhato\n"); sys.exit(2)
+j += len(tbl)
+s = s[:j] + "\t\t.download = &framebuffer_download_table,\n" + s[j:]
+open(p, "w").write(s)
+sys.stderr.write("Letoltes-kezelo beszurva a fb frontendbe\n")
+PYDL
+grep -q "framebuffer_download_table" "$SRC/netsurf/frontends/framebuffer/gui.c" \
+  && echo "   letöltés-kezelő patch OK" || { echo "HIBA: letöltés-kezelő patch nem sikerült"; exit 1; }
+
 # 3) NetSurf, framebuffer frontend, linux felület (/dev/fb + /dev/input), JS (duktape)
 echo "==> netsurf (framebuffer)"
 make -C "$SRC/netsurf" -j"$JOBS" \
@@ -861,6 +975,26 @@ if [ -d "$ROOT/FBInk" ]; then
   [ -n "$FBINK_BIN" ] && cp "$FBINK_BIN" "$OUT/fbink" && "${CROSS}strip" "$OUT/fbink" 2>/dev/null || true
 fi
 [ -f "$OUT/fbink" ] && echo "   fbink kész: $(file "$OUT/fbink" | cut -c1-50)" || echo "   FIGYELEM: fbink nem épült meg (a NetSurf attól még kész)"
+
+# 5) libmobi + mobitool – azw3/mobi/KF8 -> EPUB konverzió a készüléken (külső függőség
+#    nélkül: beépített miniz + xmlwriter). Best-effort: ha nem épül, a többi attól kész.
+echo "==> libmobi (mobitool, azw3->epub)"
+if [ ! -d "$ROOT/libmobi" ]; then
+  git clone --depth 1 https://github.com/bfabiszewski/libmobi "$ROOT/libmobi" || true
+fi
+if [ -d "$ROOT/libmobi" ]; then
+  ( cd "$ROOT/libmobi" && \
+    ./autogen.sh && \
+    ./configure --host="$TARGET_TUPLE" --prefix="$PREFIX" \
+      --enable-static --disable-shared \
+      --with-zlib=no --with-libxml2=no && \
+    make -j"$JOBS" ) || echo "   FIGYELEM: libmobi fordítás hiba"
+  MOBITOOL_BIN="$(find "$ROOT/libmobi" -name mobitool -type f -perm -u+x | head -n1 || true)"
+  if [ -n "$MOBITOOL_BIN" ]; then
+    cp "$MOBITOOL_BIN" "$OUT/mobitool" && "${CROSS}strip" "$OUT/mobitool" 2>/dev/null || true
+  fi
+fi
+[ -f "$OUT/mobitool" ] && echo "   mobitool kész: $(file "$OUT/mobitool" | cut -c1-50)" || echo "   FIGYELEM: mobitool nem épült (a konverzió kimarad)"
 
 echo "==> kimenet összeállítása"
 BIN="$(find "$SRC/netsurf" -maxdepth 2 -name 'nsfb' -type f | head -n1 || true)"
