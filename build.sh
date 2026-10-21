@@ -101,7 +101,12 @@ for lib in $TARGET_LIBS; do
 /* Kindle framebuffer surface for libnsfb.
  * A NetSurf 32bpp (ABGR) RAM-pufferbe rajzol; frissítéskor a megváltozott részt
  * luminanciává (8bpp szürke) alakítva másoljuk a valódi /dev/fb0-ba (Y8, hwtcon_v2).
- * Az e-ink frissítést külső fbink intézi. Felület neve: "kindle". */
+ * Az e-ink frissítést külső fbink intézi. Felület neve: "kindle".
+ * Az érintőképernyőt közvetlenül a /dev/input/event* evdev eszközről olvassuk:
+ *   - koppintás  -> egérkattintás (MOUSE_1 le/fel az adott ponton)
+ *   - függőleges húzás -> görgetés (MOUSE_4/MOUSE_5)
+ * Tengely-tájolás környezeti változókkal igazítható újrafordítás nélkül:
+ *   NETSURF_TOUCH_DEV, NETSURF_TOUCH_SWAP, NETSURF_TOUCH_INVX, NETSURF_TOUCH_INVY */
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -110,9 +115,13 @@ for lib in $TARGET_LIBS; do
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
+#include <errno.h>
+#include <poll.h>
+#include <dirent.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <linux/fb.h>
+#include <linux/input.h>
 
 #include "libnsfb.h"
 #include "libnsfb_plot.h"
@@ -128,6 +137,76 @@ static int      kfb_fd = -1;
 static uint8_t *kfb_mem = NULL;      /* a valódi framebuffer mmap-je (8bpp) */
 static size_t   kfb_memlen = 0;
 static int      kfb_linelen = 0;     /* a fb sor hossza bájtban */
+
+/* ---- érintés (evdev) ---- */
+#ifndef ABS_MT_POSITION_X
+#define ABS_MT_POSITION_X 0x35
+#endif
+#ifndef ABS_MT_POSITION_Y
+#define ABS_MT_POSITION_Y 0x36
+#endif
+#ifndef ABS_MT_TRACKING_ID
+#define ABS_MT_TRACKING_ID 0x39
+#endif
+
+#define BITS_PER_LONG (sizeof(long) * 8)
+#define NBITS(x) ((((x) - 1) / BITS_PER_LONG) + 1)
+#define TEST_BIT(bit, arr) (((arr)[(bit) / BITS_PER_LONG] >> ((bit) % BITS_PER_LONG)) & 1)
+
+static int   ts_fd = -1;
+static int   ts_inited = 0;
+static int   ts_min_x = 0, ts_max_x = 0, ts_min_y = 0, ts_max_y = 0;
+static int   ts_swap = 0, ts_invx = 0, ts_invy = 0;
+
+/* nyers érintés-állapot az aktuális frame-ben */
+static int   raw_x = 0, raw_y = 0;
+static int   have_x = 0, have_y = 0;
+static int   frame_down = -1;        /* -1: nincs váltás, 0: fel, 1: le */
+
+/* gesztus-állapot */
+static int   g_down = 0;
+static int   g_start_x = 0, g_start_y = 0;
+static int   g_last_x = 0,  g_last_y = 0;
+static int   g_moved = 0;
+static int   g_scrolling = 0;
+static int   g_scroll_accum = 0;
+
+#define TAP_MAX_MOVE 18      /* ennél kisebb elmozdulás: koppintás */
+#define SCROLL_STEP  80      /* ennyi képpont húzás = egy görgetőlépés */
+#define SCROLL_MAX_PER_FRAME 4
+
+/* kis esemény-sor, mert a felület hívásonként egy eseményt adhat vissza */
+#define EVQ_SIZE 64
+static nsfb_event_t evq[EVQ_SIZE];
+static int evq_head = 0, evq_tail = 0;
+
+static void evq_push_key(enum nsfb_event_type_e type, enum nsfb_key_code_e code)
+{
+    int nt = (evq_tail + 1) % EVQ_SIZE;
+    if (nt == evq_head) return;            /* tele: eldobjuk */
+    evq[evq_tail].type = type;
+    evq[evq_tail].value.keycode = code;
+    evq_tail = nt;
+}
+
+static void evq_push_move(int x, int y)
+{
+    int nt = (evq_tail + 1) % EVQ_SIZE;
+    if (nt == evq_head) return;
+    evq[evq_tail].type = NSFB_EVENT_MOVE_ABSOLUTE;
+    evq[evq_tail].value.vector.x = x;
+    evq[evq_tail].value.vector.y = y;
+    evq[evq_tail].value.vector.z = 0;
+    evq_tail = nt;
+}
+
+static int evq_pop(nsfb_event_t *out)
+{
+    if (evq_head == evq_tail) return 0;
+    *out = evq[evq_head];
+    evq_head = (evq_head + 1) % EVQ_SIZE;
+    return 1;
+}
 
 static int kindle_defaults(nsfb_t *nsfb)
 {
@@ -207,21 +286,199 @@ static int kindle_update(nsfb_t *nsfb, nsfb_bbox_t *box)
 
 static int kindle_finalise(nsfb_t *nsfb)
 {
+    UNUSED(nsfb);
     if (nsfb->ptr != NULL) { free(nsfb->ptr); nsfb->ptr = NULL; }
     if (kfb_mem != NULL) { munmap(kfb_mem, kfb_memlen); kfb_mem = NULL; }
     if (kfb_fd != -1) { close(kfb_fd); kfb_fd = -1; }
+    if (ts_fd != -1) { close(ts_fd); ts_fd = -1; }
     return 0;
+}
+
+/* érintőeszköz megkeresése: az első olyan /dev/input/event*, amelyiken van
+ * ABS_MT_POSITION_X vagy ABS_X. NETSURF_TOUCH_DEV felülírja. */
+static int ts_open(void)
+{
+    const char *env = getenv("NETSURF_TOUCH_DEV");
+    int i, fd;
+    unsigned long absbits[NBITS(ABS_MAX + 1)];
+    char path[64];
+
+    ts_swap = getenv("NETSURF_TOUCH_SWAP") ? 1 : 0;
+    ts_invx = getenv("NETSURF_TOUCH_INVX") ? 1 : 0;
+    ts_invy = getenv("NETSURF_TOUCH_INVY") ? 1 : 0;
+
+    if (env != NULL && env[0] != '\0') {
+        fd = open(env, O_RDONLY | O_NONBLOCK);
+        if (fd >= 0) return fd;
+    }
+
+    for (i = 0; i < 32; i++) {
+        snprintf(path, sizeof(path), "/dev/input/event%d", i);
+        fd = open(path, O_RDONLY | O_NONBLOCK);
+        if (fd < 0) continue;
+        memset(absbits, 0, sizeof(absbits));
+        if (ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits) >= 0) {
+            if (TEST_BIT(ABS_MT_POSITION_X, absbits) || TEST_BIT(ABS_X, absbits)) {
+                return fd;
+            }
+        }
+        close(fd);
+    }
+    return -1;
+}
+
+static void ts_read_range(int fd, int axis, int *mn, int *mx)
+{
+    struct input_absinfo ai;
+    if (ioctl(fd, EVIOCGABS(axis), &ai) >= 0 && ai.maximum > ai.minimum) {
+        *mn = ai.minimum; *mx = ai.maximum;
+    }
+}
+
+static void ts_setup(nsfb_t *nsfb)
+{
+    ts_inited = 1;
+    ts_fd = ts_open();
+    if (ts_fd < 0) return;
+
+    /* tartományok: előnyben a multitouch tengelyek */
+    ts_min_x = 0; ts_max_x = nsfb->width  - 1;
+    ts_min_y = 0; ts_max_y = nsfb->height - 1;
+    ts_read_range(ts_fd, ABS_MT_POSITION_X, &ts_min_x, &ts_max_x);
+    if (ts_max_x == nsfb->width - 1)  ts_read_range(ts_fd, ABS_X, &ts_min_x, &ts_max_x);
+    ts_read_range(ts_fd, ABS_MT_POSITION_Y, &ts_min_y, &ts_max_y);
+    if (ts_max_y == nsfb->height - 1) ts_read_range(ts_fd, ABS_Y, &ts_min_y, &ts_max_y);
+}
+
+static int scale(int v, int mn, int mx, int screen)
+{
+    int s;
+    if (mx <= mn) return v;
+    s = (int)((long)(v - mn) * (screen - 1) / (mx - mn));
+    if (s < 0) s = 0;
+    if (s > screen - 1) s = screen - 1;
+    return s;
+}
+
+/* egy SYN_REPORT kiértékelése: a nyers állapotból nsfb eseményeket gyártunk */
+static void ts_process_frame(nsfb_t *nsfb)
+{
+    int sx, sy, tmp, dx, dy, nscroll;
+
+    /* skálázás a kijelzőre */
+    sx = scale(raw_x, ts_min_x, ts_max_x, nsfb->width);
+    sy = scale(raw_y, ts_min_y, ts_max_y, nsfb->height);
+    if (ts_swap) { tmp = sx; sx = sy; sy = tmp; }
+    if (ts_invx) sx = nsfb->width  - 1 - sx;
+    if (ts_invy) sy = nsfb->height - 1 - sy;
+
+    /* lenyomás kezdete */
+    if (frame_down == 1 && !g_down) {
+        g_down = 1;
+        g_start_x = sx; g_start_y = sy;
+        g_last_x = sx;  g_last_y = sy;
+        g_moved = 0; g_scrolling = 0; g_scroll_accum = 0;
+    }
+
+    /* mozgás lenyomott ujjal */
+    if (g_down && (have_x || have_y)) {
+        dx = sx - g_last_x;
+        dy = sy - g_last_y;
+        g_moved += (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+        if (!g_scrolling && g_moved > TAP_MAX_MOVE) {
+            g_scrolling = 1;
+            g_scroll_accum = 0;
+        }
+        if (g_scrolling) {
+            g_scroll_accum += dy;
+            nscroll = 0;
+            /* ujj felfelé (dy<0) -> tartalom lefelé gördül -> MOUSE_5 */
+            while (g_scroll_accum <= -SCROLL_STEP && nscroll < SCROLL_MAX_PER_FRAME) {
+                evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_MOUSE_5);
+                g_scroll_accum += SCROLL_STEP; nscroll++;
+            }
+            while (g_scroll_accum >= SCROLL_STEP && nscroll < SCROLL_MAX_PER_FRAME) {
+                evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_MOUSE_4);
+                g_scroll_accum -= SCROLL_STEP; nscroll++;
+            }
+        }
+        g_last_x = sx; g_last_y = sy;
+    }
+
+    /* elengedés */
+    if (frame_down == 0 && g_down) {
+        if (!g_scrolling) {
+            /* koppintás -> kattintás a kezdőponton */
+            evq_push_move(g_start_x, g_start_y);
+            evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_MOUSE_1);
+            evq_push_key(NSFB_EVENT_KEY_UP, NSFB_KEY_MOUSE_1);
+        }
+        g_down = 0;
+    }
+
+    /* frame állapot nullázása a következőhöz */
+    frame_down = -1;
+    have_x = have_y = 0;
 }
 
 static bool kindle_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
 {
-    UNUSED(nsfb); UNUSED(event);
-    if (timeout > 0) {
-        struct timespec ts;
-        ts.tv_sec = timeout / 1000;
-        ts.tv_nsec = (long)(timeout % 1000) * 1000000L;
-        nanosleep(&ts, NULL);
+    struct input_event iev;
+    struct pollfd pfd;
+    ssize_t n;
+    int pr;
+
+    if (!ts_inited) ts_setup(nsfb);
+
+    /* először a sorban álló eseményt adjuk vissza */
+    if (evq_pop(event)) return true;
+
+    if (ts_fd < 0) {
+        /* nincs érintőeszköz: csak várunk, hogy a NetSurf ne pörögjön */
+        if (timeout > 0) {
+            struct timespec ts;
+            ts.tv_sec = timeout / 1000;
+            ts.tv_nsec = (long)(timeout % 1000) * 1000000L;
+            nanosleep(&ts, NULL);
+        }
+        return false;
     }
+
+    pfd.fd = ts_fd;
+    pfd.events = POLLIN;
+    pr = poll(&pfd, 1, timeout < 0 ? -1 : timeout);
+    if (pr <= 0) return false;      /* időtúllépés vagy hiba */
+
+    /* az összes elérhető evdev-rekord beolvasása és feldolgozása */
+    while ((n = read(ts_fd, &iev, sizeof(iev))) == (ssize_t)sizeof(iev)) {
+        switch (iev.type) {
+        case EV_ABS:
+            switch (iev.code) {
+            case ABS_MT_POSITION_X: raw_x = iev.value; have_x = 1; break;
+            case ABS_X:             raw_x = iev.value; have_x = 1; break;
+            case ABS_MT_POSITION_Y: raw_y = iev.value; have_y = 1; break;
+            case ABS_Y:             raw_y = iev.value; have_y = 1; break;
+            case ABS_MT_TRACKING_ID:
+                frame_down = (iev.value < 0) ? 0 : 1;
+                break;
+            default: break;
+            }
+            break;
+        case EV_KEY:
+            if (iev.code == BTN_TOUCH) {
+                frame_down = iev.value ? 1 : 0;
+            }
+            break;
+        case EV_SYN:
+            if (iev.code == SYN_REPORT) {
+                ts_process_frame(nsfb);
+            }
+            break;
+        default: break;
+        }
+    }
+
+    if (evq_pop(event)) return true;
     return false;
 }
 
