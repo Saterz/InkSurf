@@ -151,6 +151,40 @@ static uint8_t *kfb_mem = NULL;      /* a valódi framebuffer mmap-je (8bpp) */
 static size_t   kfb_memlen = 0;
 static int      kfb_linelen = 0;     /* a fb sor hossza bájtban */
 
+/* ---- MTK (hwtcon) e-ink frissítés: a rajzolt régiót azonnal kitesszük a kijelzőre ----
+ * Forrás: FBInk/eink/mtk-kindle.h (PW5/PW6, hwtcon_v2). A struktúra méretét az _IOW
+ * is kódolja, ezért pontosan kell. */
+struct mtk_rect { uint32_t top, left, width, height; };
+struct mtk_alt_buffer { uint32_t phys_addr, width, height; struct mtk_rect region; };
+struct mtk_swipe { uint32_t direction, steps; };
+struct mtk_update_data {
+    struct mtk_rect        update_region;
+    uint32_t               waveform_mode;
+    uint32_t               update_mode;
+    uint32_t               update_marker;
+    int32_t                temp;
+    uint32_t               flags;
+    int32_t                dither_mode;
+    int32_t                quant_bit;
+    struct mtk_alt_buffer  alt_buffer_data;
+    struct mtk_swipe       swipe_data;
+    uint32_t               hist_bw_waveform_mode;
+    uint32_t               hist_gray_waveform_mode;
+    uint32_t               ts_pxp;
+    uint32_t               ts_epdc;
+};
+#define MTK_WAVEFORM_AUTO   257
+#define MTK_WAVEFORM_GC16   2
+#define MTK_WAVEFORM_GL16   3
+#define MTK_UPDATE_PARTIAL  0
+#define MTK_UPDATE_FULL     1
+#define MTK_TEMP_AMBIENT    0x1000
+#define MXCFB_SEND_UPDATE_MTK _IOW('F', 0x2E, struct mtk_update_data)
+
+static int      mtk_ok = 1;          /* 0: az ioctl nem megy, marad az fbink hurok */
+static uint32_t mtk_marker = 0;
+static int      mtk_logged = 0;      /* az első ioctl eredményét naplózzuk */
+
 /* ---- érintés (evdev) ---- */
 #ifndef ABS_MT_POSITION_X
 #define ABS_MT_POSITION_X 0x35
@@ -192,7 +226,6 @@ static int   g_scroll_accum = 0;
 #define EVQ_SIZE 64
 static nsfb_event_t evq[EVQ_SIZE];
 static int evq_head = 0, evq_tail = 0;
-static int ktdbg = 0;    /* diagnosztikai sorok számlálója (korlátozzuk) */
 
 static void evq_push_key(enum nsfb_event_type_e type, enum nsfb_key_code_e code)
 {
@@ -284,6 +317,8 @@ static int kindle_update(nsfb_t *nsfb, nsfb_bbox_t *box)
     if (x1 > nsfb->width)  x1 = nsfb->width;
     if (y1 > nsfb->height) y1 = nsfb->height;
 
+    if (x1 <= x0 || y1 <= y0) return 0;
+
     for (y = y0; y < y1; y++) {
         const uint32_t *src = (const uint32_t *)(nsfb->ptr + (size_t)y * nsfb->linelen);
         uint8_t *dst = kfb_mem + (size_t)y * kfb_linelen;
@@ -293,6 +328,29 @@ static int kindle_update(nsfb_t *nsfb, nsfb_bbox_t *box)
             int g = (p >> 8)  & 0xFF;
             int b = (p >> 16) & 0xFF;
             dst[x] = (uint8_t)((r * 77 + g * 151 + b * 28) >> 8); /* luminancia */
+        }
+    }
+
+    /* a megrajzolt régió azonnali e-ink frissítése (nincs külső pollozó hurok) */
+    if (mtk_ok) {
+        struct mtk_update_data u;
+        int big = ((x1 - x0) * (y1 - y0)) > (nsfb->width * nsfb->height / 2);
+        memset(&u, 0, sizeof(u));
+        u.update_region.left   = (uint32_t)x0;
+        u.update_region.top    = (uint32_t)y0;
+        u.update_region.width  = (uint32_t)(x1 - x0);
+        u.update_region.height = (uint32_t)(y1 - y0);
+        u.waveform_mode = MTK_WAVEFORM_AUTO;
+        /* nagy terület (oldalbetöltés) -> teljes, tiszta frissítés; kicsi -> gyors részleges */
+        u.update_mode   = big ? MTK_UPDATE_FULL : MTK_UPDATE_PARTIAL;
+        u.update_marker = ++mtk_marker;
+        u.temp          = MTK_TEMP_AMBIENT;
+        if (ioctl(kfb_fd, MXCFB_SEND_UPDATE_MTK, &u) < 0) {
+            if (!mtk_logged) { ktlog("MXCFB_SEND_UPDATE_MTK HIBA (errno=%d) -> marad az fbink hurok", errno); mtk_logged = 1; }
+            mtk_ok = 0;   /* nem megy: marad az fbink tartalék */
+        } else if (!mtk_logged) {
+            ktlog("MXCFB_SEND_UPDATE_MTK OK (refresh-on-draw aktiv)");
+            mtk_logged = 1;
         }
     }
     return 0;
@@ -456,8 +514,7 @@ static void ts_process_frame(nsfb_t *nsfb)
             evq_push_move(g_start_x, g_start_y);
             evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_MOUSE_1);
             evq_push_key(NSFB_EVENT_KEY_UP, NSFB_KEY_MOUSE_1);
-            if (ktdbg < 200) { ktlog("KOPPINTAS -> kattintas (%d,%d)", g_start_x, g_start_y); ktdbg++; }
-        } else if (ktdbg < 200) { ktlog("GORGETES vege"); ktdbg++; }
+        }
         g_down = 0;
     }
 
@@ -493,14 +550,9 @@ static bool kindle_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
     pfd.events = POLLIN;
     pr = poll(&pfd, 1, timeout < 0 ? -1 : timeout);
     if (pr <= 0) return false;      /* időtúllépés vagy hiba */
-    if (ktdbg < 200) { ktlog("poll POLLIN (revents=0x%x)", pfd.revents); ktdbg++; }
 
     /* az összes elérhető evdev-rekord beolvasása és feldolgozása */
     while ((n = read(ts_fd, &iev, sizeof(iev))) == (ssize_t)sizeof(iev)) {
-        if (ktdbg < 200) {
-            ktlog("ev type=%u code=%u value=%d", iev.type, iev.code, iev.value);
-            ktdbg++;
-        }
         switch (iev.type) {
         case EV_ABS:
             switch (iev.code) {
@@ -676,6 +728,30 @@ if [ "$ok" = "1" ] && tar xzf jpeg.tar.gz 2>/dev/null; then
 fi
 if [ "$JPEG_OK" = "1" ]; then echo "   libjpeg kész (JPEG be)"; else echo "   FIGYELEM: libjpeg kimaradt (csak PNG lesz)"; fi
 
+# 2h) libwebp – a WebP képekhez (pl. magyar híroldalak). Best-effort.
+WEBP_OK=0
+WEBP_VER="1.4.0"
+echo "==> libwebp ${WEBP_VER} (target, statikus)"
+ok=0
+for url in \
+  "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-${WEBP_VER}.tar.gz" \
+  "https://github.com/webmproject/libwebp/releases/download/v${WEBP_VER}/libwebp-${WEBP_VER}.tar.gz" ; do
+  echo "   libwebp letöltés: $url"
+  if curl -fSL --retry 3 -o webp.tar.gz "$url"; then ok=1; break; fi
+  sleep 5
+done
+if [ "$ok" = "1" ] && tar xzf webp.tar.gz 2>/dev/null; then
+  if ( cd "libwebp-${WEBP_VER}" && \
+       ./configure --host="$TARGET_TUPLE" --prefix="$PREFIX" \
+         --enable-static --disable-shared \
+         --disable-gif --disable-tiff --disable-jpeg --disable-png --disable-wic \
+         --disable-libwebpmux --disable-libwebpdemux && \
+       make -j"$JOBS" && make install ); then
+    [ -f "$PREFIX/lib/pkgconfig/libwebp.pc" ] && WEBP_OK=1
+  fi
+fi
+if [ "$WEBP_OK" = "1" ]; then echo "   libwebp kész (WebP be)"; else echo "   FIGYELEM: libwebp kimaradt"; fi
+
 # a NetSurf a -ljpeg-et pkg-config nélkül adja hozzá, ezért a fordító keresési útjába
 # tesszük a prefixünket (a png-t pkg-config amúgy is megtalálja)
 export CPATH="$PREFIX/include${CPATH:+:$CPATH}"
@@ -748,6 +824,11 @@ python3 "$ROOT/patcher.py" "$SRC/netsurf/frontends/framebuffer/fetch.c"
 grep -q "nsmap" "$SRC/netsurf/frontends/framebuffer/fetch.c" \
   || { echo "HIBA: a fetch_filetype csere nem sikerült"; exit 1; }
 
+# 2j) A képernyő-billentyűzet (OSK) sötét háttere -> fehér (e-ink), hogy ne legyen fekete sáv
+sed -i 's/fbtk_get_height(root) - wh, 0, wh, 0xff202020/fbtk_get_height(root) - wh, 0, wh, 0xffffffff/' \
+  "$SRC/netsurf/frontends/framebuffer/fbtk/osk.c" || true
+echo "   OSK háttér fehérre állítva:"; grep -n "0xffffffff" "$SRC/netsurf/frontends/framebuffer/fbtk/osk.c" | head -1 || true
+
 # 3) NetSurf, framebuffer frontend, linux felület (/dev/fb + /dev/input), JS (duktape)
 echo "==> netsurf (framebuffer)"
 make -C "$SRC/netsurf" -j"$JOBS" \
@@ -760,7 +841,7 @@ make -C "$SRC/netsurf" -j"$JOBS" \
   PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" \
   NETSURF_USE_DUKTAPE=YES \
   NETSURF_USE_JPEG=$([ "$JPEG_OK" = "1" ] && echo YES || echo NO) \
-  NETSURF_USE_PNG=YES NETSURF_USE_WEBP=NO \
+  NETSURF_USE_PNG=YES NETSURF_USE_WEBP=$([ "$WEBP_OK" = "1" ] && echo YES || echo NO) \
   NETSURF_USE_ROSPRITE=NO NETSURF_USE_NSSVG=NO NETSURF_USE_VIDEO=NO \
   NETSURF_USE_HARU_PDF=NO NETSURF_USE_CURL=YES NETSURF_USE_OPENSSL=YES
 
