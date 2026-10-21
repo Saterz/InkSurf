@@ -91,15 +91,118 @@ echo "==> target libek fordítása"
 for lib in $TARGET_LIBS; do
   echo "   -- $lib"
   if [ "$lib" = "libnsfb" ]; then
-    # a libnsfb rajzoló-forrásainak becsomagolása, hogy pontosan meg tudjuk írni
-    # a Kindle framebuffer felületet (ram.c mint minta + a felület-API fejlécek)
-    mkdir -p "$OUT/libnsfb-src"
-    cp -r "$SRC/$lib/src/surface" "$OUT/libnsfb-src/surface" 2>/dev/null || true
-    cp -r "$SRC/$lib/include"     "$OUT/libnsfb-src/include" 2>/dev/null || true
-    cp    "$SRC/$lib/Makefile"    "$OUT/libnsfb-src/Makefile" 2>/dev/null || true
-    echo "   >>> libnsfb forrás becsomagolva az artifactba (libnsfb-src)"
+    # --- Saját Kindle framebuffer felület beillesztése a libnsfb-be ---
+    echo "   >>> kindle framebuffer surface hozzáadása"
+    cat > "$SRC/$lib/src/surface/kindlefb.c" <<'KFBEOF'
+/* Kindle framebuffer surface for libnsfb (/dev/fb0, 8bpp grayscale).
+ * Az e-ink frissítést külső fbink intézi. Felület neve: "kindle". */
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <time.h>
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <linux/fb.h>
+
+#include "libnsfb.h"
+#include "libnsfb_plot.h"
+#include "libnsfb_event.h"
+
+#include "nsfb.h"
+#include "surface.h"
+#include "plot.h"
+
+#define UNUSED(x) ((x) = (x))
+
+static int kindle_fd = -1;
+static void *kindle_mem = NULL;
+static size_t kindle_memlen = 0;
+
+static int kindle_defaults(nsfb_t *nsfb)
+{
+    nsfb->width = 0;
+    nsfb->height = 0;
+    nsfb->format = NSFB_FMT_I8;
+    select_plotters(nsfb);
+    return 0;
+}
+
+static int kindle_initialise(nsfb_t *nsfb)
+{
+    struct fb_var_screeninfo vinfo;
+    struct fb_fix_screeninfo finfo;
+    const char *dev = getenv("FRAMEBUFFER");
+    if (dev == NULL) dev = "/dev/fb0";
+
+    kindle_fd = open(dev, O_RDWR);
+    if (kindle_fd == -1) return -1;
+
+    if (ioctl(kindle_fd, FBIOGET_FSCREENINFO, &finfo) == -1) { close(kindle_fd); kindle_fd = -1; return -1; }
+    if (ioctl(kindle_fd, FBIOGET_VSCREENINFO, &vinfo) == -1) { close(kindle_fd); kindle_fd = -1; return -1; }
+
+    nsfb->width = vinfo.xres;
+    nsfb->height = vinfo.yres;
+    nsfb->format = NSFB_FMT_I8;
+    select_plotters(nsfb);
+
+    kindle_memlen = finfo.smem_len;
+    kindle_mem = mmap(NULL, kindle_memlen, PROT_READ | PROT_WRITE, MAP_SHARED, kindle_fd, 0);
+    if (kindle_mem == MAP_FAILED) { kindle_mem = NULL; close(kindle_fd); kindle_fd = -1; return -1; }
+
+    nsfb->ptr = kindle_mem;
+    nsfb->linelen = finfo.line_length;
+    return 0;
+}
+
+static int kindle_set_geometry(nsfb_t *nsfb, int width, int height, enum nsfb_format_e format)
+{
+    if (width > 0)  nsfb->width = width;
+    if (height > 0) nsfb->height = height;
+    nsfb->format = (format != NSFB_FMT_ANY) ? format : NSFB_FMT_I8;
+    select_plotters(nsfb);
+    return 0;  /* soha nem reallokálunk: nsfb->ptr a framebuffer mmap-je */
+}
+
+static int kindle_finalise(nsfb_t *nsfb)
+{
+    if (kindle_mem != NULL) { munmap(kindle_mem, kindle_memlen); kindle_mem = NULL; }
+    if (kindle_fd != -1) { close(kindle_fd); kindle_fd = -1; }
+    nsfb->ptr = NULL;
+    return 0;
+}
+
+static bool kindle_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
+{
+    UNUSED(nsfb); UNUSED(event);
+    if (timeout > 0) {
+        struct timespec ts;
+        ts.tv_sec = timeout / 1000;
+        ts.tv_nsec = (long)(timeout % 1000) * 1000000L;
+        nanosleep(&ts, NULL);
+    }
+    return false;
+}
+
+const nsfb_surface_rtns_t kindle_rtns = {
+    .defaults = kindle_defaults,
+    .initialise = kindle_initialise,
+    .finalise = kindle_finalise,
+    .input = kindle_input,
+    .geometry = kindle_set_geometry,
+};
+
+NSFB_SURFACE_DEF(kindle, NSFB_SURFACE_LINUX, &kindle_rtns)
+KFBEOF
+    # a surface/Makefile-ban a mindig fordított kezelőkhöz hozzáadjuk
+    sed -i 's/^SURFACE_HANDLER_yes := surface.c ram.c/SURFACE_HANDLER_yes := surface.c ram.c kindlefb.c/' \
+        "$SRC/$lib/src/surface/Makefile"
+    echo "   >>> surface/Makefile SURFACE_HANDLER_yes:"; grep "SURFACE_HANDLER_yes :=" "$SRC/$lib/src/surface/Makefile"
     tmake "$lib"
     tmake "$lib" install
+    echo "   >>> lefordult-e a kindlefb?"; find "$SRC/$lib" -name 'kindlefb*.o' | head || echo "   (nem)"
   else
     tmake "$lib"
     tmake "$lib" install
