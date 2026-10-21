@@ -91,6 +91,10 @@ echo "==> target libek fordítása"
 for lib in $TARGET_LIBS; do
   echo "   -- $lib"
   if [ "$lib" = "libnsfb" ]; then
+    # a paletta-API forrásainak becsomagolása (a szürkepaletta megírásához)
+    mkdir -p "$OUT/libnsfb-src"
+    cp "$SRC/$lib"/src/*.h "$OUT/libnsfb-src/" 2>/dev/null || true
+    cp "$SRC/$lib"/src/palette.c "$SRC/$lib"/src/libnsfb.c "$OUT/libnsfb-src/" 2>/dev/null || true
     # --- Saját Kindle framebuffer felület beillesztése a libnsfb-be ---
     echo "   >>> kindle framebuffer surface hozzáadása"
     cat > "$SRC/$lib/src/surface/kindlefb.c" <<'KFBEOF'
