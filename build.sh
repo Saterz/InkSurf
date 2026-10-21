@@ -133,6 +133,19 @@ for lib in $TARGET_LIBS; do
 
 #define UNUSED(x) ((x) = (x))
 
+#include <stdarg.h>
+/* diagnosztikai napló a stderr-re (az indító a netsurf.log-ba irányítja) */
+static void ktlog(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    fputs("KINDLETOUCH: ", stderr);
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+    fflush(stderr);
+    va_end(ap);
+}
+
 static int      kfb_fd = -1;
 static uint8_t *kfb_mem = NULL;      /* a valódi framebuffer mmap-je (8bpp) */
 static size_t   kfb_memlen = 0;
@@ -179,6 +192,7 @@ static int   g_scroll_accum = 0;
 #define EVQ_SIZE 64
 static nsfb_event_t evq[EVQ_SIZE];
 static int evq_head = 0, evq_tail = 0;
+static int ktdbg = 0;    /* diagnosztikai sorok számlálója (korlátozzuk) */
 
 static void evq_push_key(enum nsfb_event_type_e type, enum nsfb_key_code_e code)
 {
@@ -294,37 +308,60 @@ static int kindle_finalise(nsfb_t *nsfb)
     return 0;
 }
 
-/* érintőeszköz megkeresése: az első olyan /dev/input/event*, amelyiken van
- * ABS_MT_POSITION_X vagy ABS_X. NETSURF_TOUCH_DEV felülírja. */
+/* érintőeszköz megkeresése: előnyben a multitouch (ABS_MT_POSITION_X),
+ * másodsorban ABS_X. NETSURF_TOUCH_DEV felülírja. */
+static int ts_probe(const char *path, int *is_mt)
+{
+    int fd;
+    unsigned long absbits[NBITS(ABS_MAX + 1)];
+    char name[128];
+    int mt = 0, plain = 0;
+
+    fd = open(path, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) return -1;
+    name[0] = 0;
+    ioctl(fd, EVIOCGNAME(sizeof(name)), name);
+    memset(absbits, 0, sizeof(absbits));
+    if (ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits) >= 0) {
+        mt    = TEST_BIT(ABS_MT_POSITION_X, absbits) ? 1 : 0;
+        plain = TEST_BIT(ABS_X, absbits) ? 1 : 0;
+    }
+    ktlog("vizsgalat %s: name='%s' MT=%d ABS_X=%d", path, name, mt, plain);
+    if (mt || plain) { *is_mt = mt; return fd; }
+    close(fd);
+    return -1;
+}
+
 static int ts_open(void)
 {
     const char *env = getenv("NETSURF_TOUCH_DEV");
-    int i, fd;
-    unsigned long absbits[NBITS(ABS_MAX + 1)];
+    int i, fd, is_mt;
+    int plain_fd = -1;
     char path[64];
 
     ts_swap = getenv("NETSURF_TOUCH_SWAP") ? 1 : 0;
     ts_invx = getenv("NETSURF_TOUCH_INVX") ? 1 : 0;
     ts_invy = getenv("NETSURF_TOUCH_INVY") ? 1 : 0;
+    ktlog("tajolas: swap=%d invx=%d invy=%d", ts_swap, ts_invx, ts_invy);
 
     if (env != NULL && env[0] != '\0') {
         fd = open(env, O_RDONLY | O_NONBLOCK);
+        ktlog("NETSURF_TOUCH_DEV=%s -> fd=%d", env, fd);
         if (fd >= 0) return fd;
     }
 
+    /* 1. kör: multitouch eszköz keresése; a sima ABS_X-eset megjegyezzük tartaléknak */
     for (i = 0; i < 32; i++) {
         snprintf(path, sizeof(path), "/dev/input/event%d", i);
-        fd = open(path, O_RDONLY | O_NONBLOCK);
+        is_mt = 0;
+        fd = ts_probe(path, &is_mt);
         if (fd < 0) continue;
-        memset(absbits, 0, sizeof(absbits));
-        if (ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits) >= 0) {
-            if (TEST_BIT(ABS_MT_POSITION_X, absbits) || TEST_BIT(ABS_X, absbits)) {
-                return fd;
-            }
-        }
-        close(fd);
+        if (is_mt) { ktlog("valasztott (MT): %s fd=%d", path, fd); return fd; }
+        if (plain_fd < 0) plain_fd = fd; else close(fd);
     }
-    return -1;
+    if (plain_fd >= 0) ktlog("valasztott (sima ABS_X) fd=%d", plain_fd);
+    else ktlog("NEM talaltam erintoeszkozt");
+    return plain_fd;
 }
 
 static void ts_read_range(int fd, int axis, int *mn, int *mx)
@@ -337,9 +374,14 @@ static void ts_read_range(int fd, int axis, int *mn, int *mx)
 
 static void ts_setup(nsfb_t *nsfb)
 {
+    int gr;
     ts_inited = 1;
     ts_fd = ts_open();
     if (ts_fd < 0) return;
+
+    /* megpróbáljuk kizárólagosan lefoglalni; ha a KOReader már fogja, EBUSY-t kapunk */
+    gr = ioctl(ts_fd, EVIOCGRAB, (void *)1);
+    ktlog("EVIOCGRAB -> %d (0=siker; -1 es EBUSY: mas fogja)", gr);
 
     /* tartományok: előnyben a multitouch tengelyek */
     ts_min_x = 0; ts_max_x = nsfb->width  - 1;
@@ -348,6 +390,8 @@ static void ts_setup(nsfb_t *nsfb)
     if (ts_max_x == nsfb->width - 1)  ts_read_range(ts_fd, ABS_X, &ts_min_x, &ts_max_x);
     ts_read_range(ts_fd, ABS_MT_POSITION_Y, &ts_min_y, &ts_max_y);
     if (ts_max_y == nsfb->height - 1) ts_read_range(ts_fd, ABS_Y, &ts_min_y, &ts_max_y);
+    ktlog("tartomany X[%d..%d] Y[%d..%d] kijelzo %dx%d",
+          ts_min_x, ts_max_x, ts_min_y, ts_max_y, nsfb->width, nsfb->height);
 }
 
 static int scale(int v, int mn, int mx, int screen)
@@ -412,7 +456,8 @@ static void ts_process_frame(nsfb_t *nsfb)
             evq_push_move(g_start_x, g_start_y);
             evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_MOUSE_1);
             evq_push_key(NSFB_EVENT_KEY_UP, NSFB_KEY_MOUSE_1);
-        }
+            if (ktdbg < 200) { ktlog("KOPPINTAS -> kattintas (%d,%d)", g_start_x, g_start_y); ktdbg++; }
+        } else if (ktdbg < 200) { ktlog("GORGETES vege"); ktdbg++; }
         g_down = 0;
     }
 
@@ -448,9 +493,14 @@ static bool kindle_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
     pfd.events = POLLIN;
     pr = poll(&pfd, 1, timeout < 0 ? -1 : timeout);
     if (pr <= 0) return false;      /* időtúllépés vagy hiba */
+    if (ktdbg < 200) { ktlog("poll POLLIN (revents=0x%x)", pfd.revents); ktdbg++; }
 
     /* az összes elérhető evdev-rekord beolvasása és feldolgozása */
     while ((n = read(ts_fd, &iev, sizeof(iev))) == (ssize_t)sizeof(iev)) {
+        if (ktdbg < 200) {
+            ktlog("ev type=%u code=%u value=%d", iev.type, iev.code, iev.value);
+            ktdbg++;
+        }
         switch (iev.type) {
         case EV_ABS:
             switch (iev.code) {
