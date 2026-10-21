@@ -98,9 +98,12 @@ for lib in $TARGET_LIBS; do
     # --- Saját Kindle framebuffer felület beillesztése a libnsfb-be ---
     echo "   >>> kindle framebuffer surface hozzáadása"
     cat > "$SRC/$lib/src/surface/kindlefb.c" <<'KFBEOF'
-/* Kindle framebuffer surface for libnsfb (/dev/fb0, 8bpp grayscale).
+/* Kindle framebuffer surface for libnsfb.
+ * A NetSurf 32bpp (ABGR) RAM-pufferbe rajzol; frissítéskor a megváltozott részt
+ * luminanciává (8bpp szürke) alakítva másoljuk a valódi /dev/fb0-ba (Y8, hwtcon_v2).
  * Az e-ink frissítést külső fbink intézi. Felület neve: "kindle". */
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -121,15 +124,16 @@ for lib in $TARGET_LIBS; do
 
 #define UNUSED(x) ((x) = (x))
 
-static int kindle_fd = -1;
-static void *kindle_mem = NULL;
-static size_t kindle_memlen = 0;
+static int      kfb_fd = -1;
+static uint8_t *kfb_mem = NULL;      /* a valódi framebuffer mmap-je (8bpp) */
+static size_t   kfb_memlen = 0;
+static int      kfb_linelen = 0;     /* a fb sor hossza bájtban */
 
 static int kindle_defaults(nsfb_t *nsfb)
 {
     nsfb->width = 0;
     nsfb->height = 0;
-    nsfb->format = NSFB_FMT_I8;
+    nsfb->format = NSFB_FMT_ABGR8888;
     select_plotters(nsfb);
     return 0;
 }
@@ -141,40 +145,71 @@ static int kindle_initialise(nsfb_t *nsfb)
     const char *dev = getenv("FRAMEBUFFER");
     if (dev == NULL) dev = "/dev/fb0";
 
-    kindle_fd = open(dev, O_RDWR);
-    if (kindle_fd == -1) return -1;
+    kfb_fd = open(dev, O_RDWR);
+    if (kfb_fd == -1) return -1;
+    if (ioctl(kfb_fd, FBIOGET_FSCREENINFO, &finfo) == -1) { close(kfb_fd); kfb_fd = -1; return -1; }
+    if (ioctl(kfb_fd, FBIOGET_VSCREENINFO, &vinfo) == -1) { close(kfb_fd); kfb_fd = -1; return -1; }
 
-    if (ioctl(kindle_fd, FBIOGET_FSCREENINFO, &finfo) == -1) { close(kindle_fd); kindle_fd = -1; return -1; }
-    if (ioctl(kindle_fd, FBIOGET_VSCREENINFO, &vinfo) == -1) { close(kindle_fd); kindle_fd = -1; return -1; }
+    kfb_memlen = finfo.smem_len;
+    kfb_linelen = finfo.line_length;
+    kfb_mem = mmap(NULL, kfb_memlen, PROT_READ | PROT_WRITE, MAP_SHARED, kfb_fd, 0);
+    if (kfb_mem == MAP_FAILED) { kfb_mem = NULL; close(kfb_fd); kfb_fd = -1; return -1; }
 
+    /* a NetSurf a valódi kijelző méretén, 32bpp ABGR RAM-pufferbe rajzol */
     nsfb->width = vinfo.xres;
     nsfb->height = vinfo.yres;
-    nsfb->format = NSFB_FMT_I8;
-    select_plotters(nsfb);
-
-    kindle_memlen = finfo.smem_len;
-    kindle_mem = mmap(NULL, kindle_memlen, PROT_READ | PROT_WRITE, MAP_SHARED, kindle_fd, 0);
-    if (kindle_mem == MAP_FAILED) { kindle_mem = NULL; close(kindle_fd); kindle_fd = -1; return -1; }
-
-    nsfb->ptr = kindle_mem;
-    nsfb->linelen = finfo.line_length;
+    nsfb->format = NSFB_FMT_ABGR8888;
+    select_plotters(nsfb);               /* bpp = 32 */
+    nsfb->linelen = nsfb->width * 4;
+    nsfb->ptr = calloc((size_t)nsfb->width * nsfb->height, 4);
+    if (nsfb->ptr == NULL) {
+        munmap(kfb_mem, kfb_memlen); kfb_mem = NULL; close(kfb_fd); kfb_fd = -1;
+        return -1;
+    }
     return 0;
 }
 
 static int kindle_set_geometry(nsfb_t *nsfb, int width, int height, enum nsfb_format_e format)
 {
+    UNUSED(format);
     if (width > 0)  nsfb->width = width;
     if (height > 0) nsfb->height = height;
-    nsfb->format = (format != NSFB_FMT_ANY) ? format : NSFB_FMT_I8;
+    nsfb->format = NSFB_FMT_ABGR8888;    /* mindig 32bpp-t rajzoltatunk */
     select_plotters(nsfb);
-    return 0;  /* soha nem reallokálunk: nsfb->ptr a framebuffer mmap-je */
+    return 0;
+}
+
+/* a megrajzolt (32bpp) terület szürkévé alakítása és kiírása a 8bpp framebufferbe */
+static int kindle_update(nsfb_t *nsfb, nsfb_bbox_t *box)
+{
+    int x, y, x0, y0, x1, y1;
+    if (kfb_mem == NULL || nsfb->ptr == NULL) return 0;
+
+    x0 = box->x0; y0 = box->y0; x1 = box->x1; y1 = box->y1;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > nsfb->width)  x1 = nsfb->width;
+    if (y1 > nsfb->height) y1 = nsfb->height;
+
+    for (y = y0; y < y1; y++) {
+        const uint32_t *src = (const uint32_t *)(nsfb->ptr + (size_t)y * nsfb->linelen);
+        uint8_t *dst = kfb_mem + (size_t)y * kfb_linelen;
+        for (x = x0; x < x1; x++) {
+            uint32_t p = src[x];
+            int r =  p        & 0xFF;
+            int g = (p >> 8)  & 0xFF;
+            int b = (p >> 16) & 0xFF;
+            dst[x] = (uint8_t)((r * 77 + g * 151 + b * 28) >> 8); /* luminancia */
+        }
+    }
+    return 0;
 }
 
 static int kindle_finalise(nsfb_t *nsfb)
 {
-    if (kindle_mem != NULL) { munmap(kindle_mem, kindle_memlen); kindle_mem = NULL; }
-    if (kindle_fd != -1) { close(kindle_fd); kindle_fd = -1; }
-    nsfb->ptr = NULL;
+    if (nsfb->ptr != NULL) { free(nsfb->ptr); nsfb->ptr = NULL; }
+    if (kfb_mem != NULL) { munmap(kfb_mem, kfb_memlen); kfb_mem = NULL; }
+    if (kfb_fd != -1) { close(kfb_fd); kfb_fd = -1; }
     return 0;
 }
 
@@ -195,6 +230,7 @@ const nsfb_surface_rtns_t kindle_rtns = {
     .initialise = kindle_initialise,
     .finalise = kindle_finalise,
     .input = kindle_input,
+    .update = kindle_update,
     .geometry = kindle_set_geometry,
 };
 
