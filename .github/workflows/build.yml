@@ -78,4 +78,5 @@ jobs:
             out/netsurf
             out/fbink
             out/res/**
+            out/libnsfb-src/**
           if-no-files-found: error
