@@ -90,8 +90,21 @@ tmake() {
 echo "==> target libek fordítása"
 for lib in $TARGET_LIBS; do
   echo "   -- $lib"
-  tmake "$lib"
-  tmake "$lib" install
+  if [ "$lib" = "libnsfb" ]; then
+    echo "   >>> libnsfb Makefile felület-sorai (diagnosztika):"
+    grep -niE "surface|NSFB_|linux|frontend" "$SRC/$lib/Makefile" | head -60 || true
+    echo "   <<< vége"
+    # a Linux-framebuffer felület bekapcsolása (több lehetséges változónév egyszerre)
+    NSFB_FLAGS="NSFB_SURFACE_LINUX=yes NSFB_FRONTEND_LINUX=yes NSFB_LINUX=yes NSFB_SURFACE_RAM=yes"
+    tmake "$lib" $NSFB_FLAGS
+    tmake "$lib" $NSFB_FLAGS install
+    echo "   >>> lefordult-e a surface/linux.c?"
+    find "$SRC/$lib" -name 'linux*.o' -o -name '*surface_linux*' 2>/dev/null | head || echo "   (nem találtam linux surface objektumot)"
+    echo "   <<<"
+  else
+    tmake "$lib"
+    tmake "$lib" install
+  fi
 done
 
 # 2c) Hálózati réteg: zlib + openssl + libcurl (statikusan, a prefixünkbe)
