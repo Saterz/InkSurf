@@ -685,10 +685,12 @@ static void minimize_self(nsfb_t *nsfb, int reason)
      * ékezet-patch "közvetlen Unicode" tartományát használjuk: 0x2000+kódpont. */
     if (reason == 3) {
         const char *inj = getenv("NETSURF_INJECT_FILE");
+        ktlog("INJEKT: NETSURF_INJECT_FILE=%s", inj ? inj : "(nincs)");
         if (inj != NULL && inj[0] != 0) {
             FILE *f = fopen(inj, "rb");
+            ktlog("INJEKT: fajl megnyitva=%d", f ? 1 : 0);
             if (f != NULL) {
-                int c; unsigned int cp = 0; int need = 0;
+                int c; unsigned int cp = 0; int need = 0, pushed = 0;
                 while ((c = fgetc(f)) != EOF) {
                     unsigned char b = (unsigned char)c;
                     unsigned int out = 0; int have = 0;
@@ -705,10 +707,13 @@ static void minimize_self(nsfb_t *nsfb, int reason)
                     }
                     if (have && out >= 32) {
                         evq_push_key(NSFB_EVENT_KEY_DOWN, (enum nsfb_key_code_e)(0x2000 + out));
+                        ktlog("INJEKT push: cp=%u -> keycode=%u", out, 0x2000 + out);
+                        pushed++;
                     }
                 }
                 fclose(f);
                 remove(inj);
+                ktlog("INJEKT: osszesen %d billentyu betolve a sorba", pushed);
             }
         }
     }
