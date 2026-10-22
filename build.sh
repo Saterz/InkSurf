@@ -193,6 +193,126 @@ static int      mtk_logged = 0;      /* az első ioctl eredményét naplózzuk *
 static volatile sig_atomic_t g_resumed = 0;   /* 1: SIGCONT után teljes újrarajzolás kell */
 static void on_sigcont(int sig) { (void)sig; g_resumed = 1; }
 
+/* ===================== SAJÁT ESZKÖZTÁR (KOReader-szerű felső sáv) ===================== */
+/* DejaVuSansMono 17px, ASCII 32..126, cella 10x18, uint16 soronkent (MSB=bal) */
+#define KFB_FONT_CW 10
+#define KFB_FONT_CH 18
+#define KFB_FONT_FIRST 32
+static const unsigned short kfb_font[95][18] = {
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000}, /* 32 ' ' */
+  {0x0000,0x0000,0x0000,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0000,0x0000,0x0030,0x0030,0x0000,0x0000,0x0000}, /* 33 '!' */
+  {0x0000,0x0000,0x0000,0x0048,0x0048,0x0048,0x0048,0x0048,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000}, /* 34 '"' */
+  {0x0000,0x0000,0x0000,0x0000,0x0032,0x0026,0x0024,0x01ff,0x004c,0x004c,0x0048,0x03fe,0x0098,0x0090,0x0190,0x0000,0x0000,0x0000}, /* 35 '#' */
+  {0x0000,0x0000,0x0010,0x0010,0x007c,0x00d4,0x0090,0x0090,0x00f0,0x007c,0x001e,0x0016,0x0012,0x0096,0x007c,0x0010,0x0010,0x0010}, /* 36 '$' */
+  {0x0000,0x0000,0x0000,0x01e0,0x0320,0x0330,0x0320,0x01e6,0x0018,0x0060,0x018e,0x0013,0x0011,0x0013,0x000e,0x0000,0x0000,0x0000}, /* 37 '%' */
+  {0x0000,0x0000,0x0000,0x0078,0x00c0,0x00c0,0x00c0,0x00c0,0x00e0,0x01b1,0x0119,0x030b,0x010e,0x018e,0x00fb,0x0000,0x0000,0x0000}, /* 38 '&' */
+  {0x0000,0x0000,0x0000,0x0030,0x0030,0x0030,0x0030,0x0030,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000}, /* 39 ''' */
+  {0x0000,0x0000,0x0008,0x0018,0x0010,0x0030,0x0030,0x0020,0x0020,0x0060,0x0020,0x0020,0x0030,0x0030,0x0010,0x0018,0x0008,0x0000}, /* 40 '(' */
+  {0x0000,0x0000,0x0060,0x0020,0x0030,0x0030,0x0010,0x0018,0x0018,0x0018,0x0018,0x0018,0x0010,0x0030,0x0030,0x0020,0x0060,0x0000}, /* 41 ')' */
+  {0x0000,0x0000,0x0000,0x0010,0x0010,0x0096,0x0078,0x0078,0x0096,0x0010,0x0010,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000}, /* 42 '*' */
+  {0x0000,0x0000,0x0000,0x0000,0x0030,0x0030,0x0030,0x0030,0x01ff,0x01ff,0x0030,0x0030,0x0030,0x0030,0x0000,0x0000,0x0000,0x0000}, /* 43 '+' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0030,0x0030,0x0030,0x0020,0x0060,0x0000}, /* 44 ',' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0078,0x0078,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000}, /* 45 '-' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0030,0x0030,0x0030,0x0000,0x0000,0x0000}, /* 46 '.' */
+  {0x0000,0x0000,0x0000,0x0006,0x0004,0x000c,0x0008,0x0018,0x0010,0x0030,0x0030,0x0060,0x0060,0x00c0,0x00c0,0x0180,0x0180,0x0000}, /* 47 '/' */
+  {0x0000,0x0000,0x0000,0x0078,0x00cc,0x0086,0x0186,0x0186,0x01b6,0x01b6,0x0186,0x0186,0x0086,0x00cc,0x0078,0x0000,0x0000,0x0000}, /* 48 '0' */
+  {0x0000,0x0000,0x0000,0x0078,0x00d8,0x0018,0x0018,0x0018,0x0018,0x0018,0x0018,0x0018,0x0018,0x0018,0x00fe,0x0000,0x0000,0x0000}, /* 49 '1' */
+  {0x0000,0x0000,0x0000,0x00f8,0x018c,0x0106,0x0006,0x0006,0x000c,0x0018,0x0038,0x0070,0x0060,0x00c0,0x01fe,0x0000,0x0000,0x0000}, /* 50 '2' */
+  {0x0000,0x0000,0x0000,0x0078,0x008c,0x0006,0x0006,0x000c,0x0078,0x000c,0x0006,0x0006,0x0006,0x010c,0x00f8,0x0000,0x0000,0x0000}, /* 51 '3' */
+  {0x0000,0x0000,0x0000,0x001c,0x001c,0x003c,0x006c,0x004c,0x00cc,0x018c,0x018c,0x01fe,0x000c,0x000c,0x000c,0x0000,0x0000,0x0000}, /* 52 '4' */
+  {0x0000,0x0000,0x0000,0x00fc,0x0080,0x0080,0x0080,0x00f8,0x008c,0x0006,0x0006,0x0006,0x0006,0x010c,0x00f8,0x0000,0x0000,0x0000}, /* 53 '5' */
+  {0x0000,0x0000,0x0000,0x003c,0x00c4,0x0080,0x0180,0x01f8,0x01cc,0x0186,0x0186,0x0186,0x0086,0x00c6,0x0078,0x0000,0x0000,0x0000}, /* 54 '6' */
+  {0x0000,0x0000,0x0000,0x01fe,0x0006,0x000c,0x000c,0x000c,0x0018,0x0018,0x0030,0x0030,0x0030,0x0060,0x0060,0x0000,0x0000,0x0000}, /* 55 '7' */
+  {0x0000,0x0000,0x0000,0x0078,0x00ce,0x0186,0x0186,0x00cc,0x0078,0x00cc,0x0186,0x0186,0x0186,0x00c6,0x0078,0x0000,0x0000,0x0000}, /* 56 '8' */
+  {0x0000,0x0000,0x0000,0x0078,0x00cc,0x0186,0x0186,0x0186,0x0186,0x00ce,0x007e,0x0006,0x0004,0x008c,0x0078,0x0000,0x0000,0x0000}, /* 57 '9' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0030,0x0030,0x0030,0x0000,0x0000,0x0000,0x0030,0x0030,0x0030,0x0000,0x0000,0x0000}, /* 58 ':' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0030,0x0030,0x0030,0x0000,0x0000,0x0000,0x0030,0x0030,0x0030,0x0020,0x0060,0x0000}, /* 59 ';' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0003,0x001e,0x0078,0x01c0,0x01c0,0x0078,0x001e,0x0003,0x0000,0x0000,0x0000,0x0000}, /* 60 '<' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x01ff,0x01ff,0x0000,0x0000,0x01ff,0x01ff,0x0000,0x0000,0x0000,0x0000,0x0000}, /* 61 '=' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0100,0x01e0,0x0078,0x000e,0x000e,0x0078,0x01e0,0x0100,0x0000,0x0000,0x0000,0x0000}, /* 62 '>' */
+  {0x0000,0x0000,0x0000,0x0078,0x008c,0x0006,0x0006,0x000c,0x0018,0x0030,0x0030,0x0030,0x0000,0x0030,0x0030,0x0000,0x0000,0x0000}, /* 63 '?' */
+  {0x0000,0x0000,0x0000,0x003c,0x00c6,0x0183,0x011f,0x0133,0x0323,0x0363,0x0361,0x0363,0x0323,0x0133,0x011f,0x0080,0x00e0,0x003c}, /* 64 '@' */
+  {0x0000,0x0000,0x0000,0x0030,0x0038,0x0078,0x0068,0x004c,0x00cc,0x00cc,0x00c6,0x01fe,0x0186,0x0183,0x0303,0x0000,0x0000,0x0000}, /* 65 'A' */
+  {0x0000,0x0000,0x0000,0x01fc,0x0186,0x0186,0x0186,0x0186,0x01fc,0x0186,0x0186,0x0182,0x0182,0x0186,0x01fc,0x0000,0x0000,0x0000}, /* 66 'B' */
+  {0x0000,0x0000,0x0000,0x003c,0x0066,0x00c0,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x00c0,0x0066,0x003c,0x0000,0x0000,0x0000}, /* 67 'C' */
+  {0x0000,0x0000,0x0000,0x01f8,0x018c,0x0186,0x0186,0x0186,0x0186,0x0186,0x0186,0x0186,0x0186,0x018c,0x01f8,0x0000,0x0000,0x0000}, /* 68 'D' */
+  {0x0000,0x0000,0x0000,0x00fe,0x0080,0x0080,0x0080,0x0080,0x00fe,0x0080,0x0080,0x0080,0x0080,0x0080,0x00fe,0x0000,0x0000,0x0000}, /* 69 'E' */
+  {0x0000,0x0000,0x0000,0x00fe,0x00c0,0x00c0,0x00c0,0x00c0,0x00fe,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x0000,0x0000,0x0000}, /* 70 'F' */
+  {0x0000,0x0000,0x0000,0x007c,0x00c6,0x0080,0x0180,0x0180,0x0180,0x018e,0x0186,0x0186,0x0086,0x00c6,0x007c,0x0000,0x0000,0x0000}, /* 71 'G' */
+  {0x0000,0x0000,0x0000,0x0186,0x0186,0x0186,0x0186,0x0186,0x01fe,0x0186,0x0186,0x0186,0x0186,0x0186,0x0186,0x0000,0x0000,0x0000}, /* 72 'H' */
+  {0x0000,0x0000,0x0000,0x00fe,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x00fe,0x0000,0x0000,0x0000}, /* 73 'I' */
+  {0x0000,0x0000,0x0000,0x007c,0x000c,0x000c,0x000c,0x000c,0x000c,0x000c,0x000c,0x000c,0x000c,0x0198,0x00f0,0x0000,0x0000,0x0000}, /* 74 'J' */
+  {0x0000,0x0000,0x0000,0x0183,0x0186,0x018c,0x0198,0x01b0,0x01f0,0x01f0,0x0198,0x018c,0x018c,0x0186,0x0183,0x0000,0x0000,0x0000}, /* 75 'K' */
+  {0x0000,0x0000,0x0000,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00c0,0x00ff,0x0000,0x0000,0x0000}, /* 76 'L' */
+  {0x0000,0x0000,0x0000,0x0187,0x01c7,0x01cf,0x014b,0x016b,0x013b,0x0133,0x0133,0x0103,0x0103,0x0103,0x0103,0x0000,0x0000,0x0000}, /* 77 'M' */
+  {0x0000,0x0000,0x0000,0x01c6,0x01c6,0x01c6,0x01e6,0x01a6,0x01b6,0x0196,0x019e,0x019e,0x018e,0x018e,0x0186,0x0000,0x0000,0x0000}, /* 78 'N' */
+  {0x0000,0x0000,0x0000,0x0078,0x00cc,0x0186,0x0186,0x0186,0x0186,0x0186,0x0186,0x0186,0x0186,0x00cc,0x0078,0x0000,0x0000,0x0000}, /* 79 'O' */
+  {0x0000,0x0000,0x0000,0x00fc,0x0086,0x0086,0x0083,0x0086,0x0086,0x00fc,0x0080,0x0080,0x0080,0x0080,0x0080,0x0000,0x0000,0x0000}, /* 80 'P' */
+  {0x0000,0x0000,0x0000,0x0078,0x00cc,0x0186,0x0186,0x0186,0x0186,0x0186,0x0186,0x0186,0x0186,0x00cc,0x0078,0x000c,0x0004,0x0000}, /* 81 'Q' */
+  {0x0000,0x0000,0x0000,0x01f8,0x018c,0x0186,0x0186,0x0186,0x018c,0x01f8,0x018c,0x0184,0x0186,0x0183,0x0183,0x0000,0x0000,0x0000}, /* 82 'R' */
+  {0x0000,0x0000,0x0000,0x0078,0x00c4,0x0180,0x0180,0x0180,0x00f0,0x003c,0x0006,0x0006,0x0106,0x0186,0x00f8,0x0000,0x0000,0x0000}, /* 83 'S' */
+  {0x0000,0x0000,0x0000,0x03ff,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0000,0x0000,0x0000}, /* 84 'T' */
+  {0x0000,0x0000,0x0000,0x0186,0x0186,0x0186,0x0186,0x0186,0x0186,0x0186,0x0186,0x0186,0x0186,0x00ce,0x0078,0x0000,0x0000,0x0000}, /* 85 'U' */
+  {0x0000,0x0000,0x0000,0x0103,0x0182,0x0186,0x0186,0x0084,0x00cc,0x00cc,0x004c,0x0068,0x0078,0x0038,0x0030,0x0000,0x0000,0x0000}, /* 86 'V' */
+  {0x0000,0x0000,0x0000,0x0303,0x0303,0x0303,0x0333,0x0133,0x013a,0x01fa,0x01ea,0x01ce,0x01ce,0x00ce,0x00c6,0x0000,0x0000,0x0000}, /* 87 'W' */
+  {0x0000,0x0000,0x0000,0x0183,0x0086,0x00cc,0x006c,0x0038,0x0030,0x0038,0x0068,0x00cc,0x00c6,0x0186,0x0303,0x0000,0x0000,0x0000}, /* 88 'X' */
+  {0x0000,0x0000,0x0000,0x0103,0x0186,0x00c4,0x00cc,0x0078,0x0038,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0000,0x0000,0x0000}, /* 89 'Y' */
+  {0x0000,0x0000,0x0000,0x01ff,0x0006,0x0006,0x000c,0x0018,0x0018,0x0030,0x0060,0x0060,0x00c0,0x0180,0x01ff,0x0000,0x0000,0x0000}, /* 90 'Z' */
+  {0x0000,0x0000,0x0038,0x0020,0x0020,0x0020,0x0020,0x0020,0x0020,0x0020,0x0020,0x0020,0x0020,0x0020,0x0020,0x0020,0x0038,0x0000}, /* 91 '[' */
+  {0x0000,0x0000,0x0000,0x0180,0x0180,0x00c0,0x00c0,0x0060,0x0060,0x0030,0x0030,0x0010,0x0018,0x0008,0x000c,0x0004,0x0006,0x0000}, /* 92 '\\' */
+  {0x0000,0x0000,0x0070,0x0010,0x0010,0x0010,0x0010,0x0010,0x0010,0x0010,0x0010,0x0010,0x0010,0x0010,0x0010,0x0010,0x0070,0x0000}, /* 93 ']' */
+  {0x0000,0x0000,0x0000,0x0030,0x0078,0x00cc,0x0086,0x0182,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000}, /* 94 '^' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000}, /* 95 '_' */
+  {0x0000,0x0040,0x0020,0x0030,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000}, /* 96 '`' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0078,0x0084,0x0006,0x007e,0x01c6,0x0186,0x0186,0x018e,0x00f6,0x0000,0x0000,0x0000}, /* 97 'a' */
+  {0x0000,0x0000,0x0080,0x0080,0x0080,0x0080,0x00bc,0x00c4,0x00c6,0x0086,0x0082,0x0086,0x00c6,0x00c4,0x00bc,0x0000,0x0000,0x0000}, /* 98 'b' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x003c,0x0062,0x00c0,0x0080,0x0080,0x0080,0x00c0,0x0062,0x003c,0x0000,0x0000,0x0000}, /* 99 'c' */
+  {0x0000,0x0000,0x0006,0x0006,0x0006,0x0006,0x007e,0x00ce,0x0186,0x0186,0x0186,0x0186,0x0186,0x00ce,0x007e,0x0000,0x0000,0x0000}, /* 100 'd' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0078,0x00c4,0x0186,0x0182,0x01fe,0x0180,0x0180,0x00c2,0x007c,0x0000,0x0000,0x0000}, /* 101 'e' */
+  {0x0000,0x0000,0x001e,0x0030,0x0030,0x0030,0x00fe,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0000,0x0000,0x0000}, /* 102 'f' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0076,0x00ce,0x0186,0x0186,0x0186,0x0186,0x0186,0x00ce,0x0076,0x0006,0x0004,0x008c}, /* 103 'g' */
+  {0x0000,0x0000,0x0080,0x0080,0x0080,0x0080,0x00bc,0x00cc,0x0086,0x0086,0x0086,0x0086,0x0086,0x0086,0x0086,0x0000,0x0000,0x0000}, /* 104 'h' */
+  {0x0000,0x0000,0x0030,0x0030,0x0000,0x0000,0x00f0,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x01fe,0x0000,0x0000,0x0000}, /* 105 'i' */
+  {0x0000,0x0000,0x0018,0x0018,0x0000,0x0000,0x00f8,0x0018,0x0018,0x0018,0x0018,0x0018,0x0018,0x0018,0x0018,0x0018,0x0010,0x0030}, /* 106 'j' */
+  {0x0000,0x0000,0x00c0,0x00c0,0x00c0,0x00c0,0x00c6,0x00cc,0x00d8,0x00f0,0x00f8,0x00d8,0x00cc,0x00c6,0x00c3,0x0000,0x0000,0x0000}, /* 107 'k' */
+  {0x0000,0x0000,0x01e0,0x0020,0x0020,0x0020,0x0020,0x0020,0x0020,0x0020,0x0020,0x0020,0x0020,0x0030,0x001e,0x0000,0x0000,0x0000}, /* 108 'l' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x01ee,0x01b2,0x0132,0x0132,0x0132,0x0132,0x0132,0x0132,0x0132,0x0000,0x0000,0x0000}, /* 109 'm' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x00bc,0x00cc,0x0086,0x0086,0x0086,0x0086,0x0086,0x0086,0x0086,0x0000,0x0000,0x0000}, /* 110 'n' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0078,0x00cc,0x0186,0x0186,0x0186,0x0186,0x0186,0x00cc,0x0078,0x0000,0x0000,0x0000}, /* 111 'o' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x00b8,0x00c4,0x00c6,0x0086,0x0082,0x0086,0x00c6,0x00c4,0x00bc,0x0080,0x0080,0x0080}, /* 112 'p' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x007e,0x00ce,0x0186,0x0186,0x0186,0x0186,0x0186,0x00ce,0x007e,0x0006,0x0006,0x0006}, /* 113 'q' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x006e,0x0073,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0000,0x0000,0x0000}, /* 114 'r' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0078,0x00c4,0x0080,0x00c0,0x007c,0x000c,0x0006,0x008c,0x0078,0x0000,0x0000,0x0000}, /* 115 's' */
+  {0x0000,0x0000,0x0000,0x0060,0x0060,0x0060,0x01fe,0x0060,0x0060,0x0060,0x0060,0x0060,0x0020,0x0030,0x003e,0x0000,0x0000,0x0000}, /* 116 't' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0086,0x0086,0x0086,0x0086,0x0086,0x0086,0x0086,0x00ce,0x0076,0x0000,0x0000,0x0000}, /* 117 'u' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0182,0x0186,0x0086,0x00cc,0x00cc,0x0048,0x0078,0x0038,0x0030,0x0000,0x0000,0x0000}, /* 118 'v' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0301,0x0303,0x0103,0x0132,0x01b2,0x01be,0x01ce,0x00cc,0x00cc,0x0000,0x0000,0x0000}, /* 119 'w' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0186,0x00cc,0x0068,0x0038,0x0030,0x0078,0x004c,0x00c6,0x0186,0x0000,0x0000,0x0000}, /* 120 'x' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0182,0x0186,0x00c6,0x00c4,0x00cc,0x006c,0x0078,0x0038,0x0030,0x0030,0x0030,0x0060}, /* 121 'y' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x00fe,0x0006,0x000c,0x0018,0x0030,0x0060,0x0060,0x00c0,0x00fe,0x0000,0x0000,0x0000}, /* 122 'z' */
+  {0x0000,0x0000,0x001c,0x0010,0x0030,0x0030,0x0030,0x0030,0x0030,0x00e0,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0010,0x001c}, /* 123 '{' */
+  {0x0000,0x0000,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030}, /* 124 '|' */
+  {0x0000,0x0000,0x00e0,0x0030,0x0030,0x0030,0x0030,0x0030,0x0010,0x001c,0x0018,0x0030,0x0030,0x0030,0x0030,0x0030,0x0030,0x00e0}, /* 125 '}' */
+  {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x01e0,0x01ff,0x011e,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000}, /* 126 '~' */
+};
+
+#define KFB_TBAR_H 72          /* a saját eszköztár magassága (fizikai) */
+#define KFB_GUTTER 14          /* bal margó a tartalomnak (zoomnál is marad) */
+
+static int kfb_scrw = 0, kfb_scrh = 0;   /* FIZIKAI kijelzőméret (sáv+gutter együtt) */
+
+/* a gui.c-vel megosztott állapot (NEM static, hogy a frontend is lássa) */
+char g_toolbar_url[1024] = "";
+volatile sig_atomic_t g_toolbar_url_dirty = 1;     /* 1: újra kell rajzolni az URL-t */
+volatile sig_atomic_t g_nav_request = 0;           /* 1=vissza 2=előre 3=újratölt 4=bezár (a fő ciklus kezeli) */
+/* oldalon belüli beviteli mezők -> KOReader billentyűzet (a NetSurf saját OSK ki van kapcsolva) */
+volatile sig_atomic_t g_field_click_pending = 0;   /* a user épp mezőbe koppintott (a fő ciklus csökkenti) */
+volatile sig_atomic_t g_field_input_request = 0;   /* mező fókuszba került -> KOReader billentyűzet kell */
+volatile sig_atomic_t g_inject_request = 0;        /* folytatás után a beírt szöveget injektálni kell a mezőbe */
+
+/* gomb-azonosítók */
+enum { TB_NONE=0, TB_BACK, TB_FWD, TB_RELOAD, TB_MIN, TB_CLOSE, TB_URL };
+
 /* ---- érintés (evdev) ---- */
 #ifndef ABS_MT_POSITION_X
 #define ABS_MT_POSITION_X 0x35
@@ -306,9 +426,12 @@ static int kindle_initialise(nsfb_t *nsfb)
     kfb_mem = mmap(NULL, kfb_memlen, PROT_READ | PROT_WRITE, MAP_SHARED, kfb_fd, 0);
     if (kfb_mem == MAP_FAILED) { kfb_mem = NULL; close(kfb_fd); kfb_fd = -1; return -1; }
 
-    /* a NetSurf a valódi kijelző méretén, 32bpp ABGR RAM-pufferbe rajzol */
-    nsfb->width = vinfo.xres;
-    nsfb->height = vinfo.yres;
+    /* a FIZIKAI kijelzőméret; a NetSurf tartalmi területe ennél kisebb:
+     * fent a saját eszköztár (KFB_TBAR_H), balra a gutter (KFB_GUTTER) */
+    kfb_scrw = vinfo.xres;
+    kfb_scrh = vinfo.yres;
+    nsfb->width  = vinfo.xres - KFB_GUTTER;
+    nsfb->height = vinfo.yres - KFB_TBAR_H;
     nsfb->format = NSFB_FMT_ABGR8888;
     select_plotters(nsfb);               /* bpp = 32 */
     nsfb->linelen = nsfb->width * 4;
@@ -334,8 +457,8 @@ static int kindle_initialise(nsfb_t *nsfb)
 static int kindle_set_geometry(nsfb_t *nsfb, int width, int height, enum nsfb_format_e format)
 {
     UNUSED(format);
-    if (width > 0)  nsfb->width = width;
-    if (height > 0) nsfb->height = height;
+    if (width > 0)  { kfb_scrw = width;  nsfb->width  = width  - KFB_GUTTER; }
+    if (height > 0) { kfb_scrh = height; nsfb->height = height - KFB_TBAR_H; }
     nsfb->format = NSFB_FMT_ABGR8888;    /* mindig 32bpp-t rajzoltatunk */
     select_plotters(nsfb);
     return 0;
@@ -357,13 +480,14 @@ static int kindle_update(nsfb_t *nsfb, nsfb_bbox_t *box)
 
     for (y = y0; y < y1; y++) {
         const uint32_t *src = (const uint32_t *)(nsfb->ptr + (size_t)y * nsfb->linelen);
-        uint8_t *dst = kfb_mem + (size_t)y * kfb_linelen;
+        uint8_t *dst = kfb_mem + (size_t)(y + KFB_TBAR_H) * kfb_linelen; /* fizikai sor (sáv alatt) */
+        if (x0 == 0) { int gi; for (gi = 0; gi < KFB_GUTTER; gi++) dst[gi] = 0xFF; } /* bal gutter fehér */
         for (x = x0; x < x1; x++) {
             uint32_t p = src[x];
             int r =  p        & 0xFF;
             int g = (p >> 8)  & 0xFF;
             int b = (p >> 16) & 0xFF;
-            dst[x] = (uint8_t)((r * 77 + g * 151 + b * 28) >> 8); /* luminancia */
+            dst[x + KFB_GUTTER] = (uint8_t)((r * 77 + g * 151 + b * 28) >> 8); /* gutterrel eltolva */
         }
     }
 
@@ -372,9 +496,9 @@ static int kindle_update(nsfb_t *nsfb, nsfb_bbox_t *box)
         struct mtk_update_data u;
         int big = ((x1 - x0) * (y1 - y0)) > (nsfb->width * nsfb->height / 2);
         memset(&u, 0, sizeof(u));
-        u.update_region.left   = (uint32_t)x0;
-        u.update_region.top    = (uint32_t)y0;
-        u.update_region.width  = (uint32_t)(x1 - x0);
+        u.update_region.left   = (uint32_t)((x0 == 0) ? 0 : (x0 + KFB_GUTTER));
+        u.update_region.top    = (uint32_t)(y0 + KFB_TBAR_H);
+        u.update_region.width  = (uint32_t)((x0 == 0) ? ((x1 - x0) + KFB_GUTTER) : (x1 - x0));
         u.update_region.height = (uint32_t)(y1 - y0);
         u.waveform_mode = MTK_WAVEFORM_AUTO;
         /* nagy terület (oldalbetöltés) -> teljes, tiszta frissítés; kicsi -> gyors részleges */
@@ -392,6 +516,113 @@ static int kindle_update(nsfb_t *nsfb, nsfb_bbox_t *box)
     return 0;
 }
 
+
+/* ---------- eszköztár-rajzolás (8bpp: fehér=0xFF, fekete=0x00) ---------- */
+static void kfb_mtk_update(int x, int y, int w, int h, int full)
+{
+    struct mtk_update_data u;
+    if (!mtk_ok) return;
+    memset(&u, 0, sizeof(u));
+    u.update_region.left = (uint32_t)x; u.update_region.top = (uint32_t)y;
+    u.update_region.width = (uint32_t)w; u.update_region.height = (uint32_t)h;
+    u.waveform_mode = full ? MTK_WAVEFORM_GC16 : MTK_WAVEFORM_AUTO;
+    u.update_mode   = full ? MTK_UPDATE_FULL : MTK_UPDATE_PARTIAL;
+    u.update_marker = ++mtk_marker; u.temp = MTK_TEMP_AMBIENT;
+    if (ioctl(kfb_fd, MXCFB_SEND_UPDATE_MTK, &u) < 0) mtk_ok = 0;
+}
+static void kfb_px(int x, int y, uint8_t v)
+{
+    if (x < 0 || y < 0 || x >= kfb_scrw || y >= kfb_scrh) return;
+    kfb_mem[(size_t)y * kfb_linelen + x] = v;
+}
+static void kfb_fill(int x, int y, int w, int h, uint8_t v)
+{
+    int i, j; for (j = 0; j < h; j++) for (i = 0; i < w; i++) kfb_px(x + i, y + j, v);
+}
+static void kfb_line(int x0, int y0, int x1, int y1, uint8_t v, int th)
+{
+    int dx = (x1>x0)?(x1-x0):(x0-x1), dy = (y1>y0)?(y1-y0):(y0-y1);
+    int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1, err = dx - dy, e2, k, l;
+    for (;;) {
+        for (k = -th/2; k <= th/2; k++) for (l = -th/2; l <= th/2; l++) kfb_px(x0 + k, y0 + l, v);
+        if (x0 == x1 && y0 == y1) break;
+        e2 = 2 * err; if (e2 > -dy) { err -= dy; x0 += sx; } if (e2 < dx) { err += dx; y0 += sy; }
+    }
+}
+static void kfb_tri_left(int cx, int cy, int s, uint8_t v)   /* ◀ tömör háromszög */
+{
+    int yy, x; for (yy = -s; yy <= s; yy++) { int ay = yy<0?-yy:yy; for (x = cx - s + ay; x <= cx + s; x++) kfb_px(x, cy + yy, v); }
+}
+static void kfb_tri_right(int cx, int cy, int s, uint8_t v)  /* ▶ tömör háromszög */
+{
+    int yy, x; for (yy = -s; yy <= s; yy++) { int ay = yy<0?-yy:yy; for (x = cx - s; x <= cx + s - ay; x++) kfb_px(x, cy + yy, v); }
+}
+static void kfb_reload(int cx, int cy, int r, uint8_t v)     /* ⟳ gyűrű réssel + nyílhegy, trig nélkül */
+{
+    int yy, xx, r2 = r*r, rin = (r-3)*(r-3);
+    for (yy = -r; yy <= r; yy++) for (xx = -r; xx <= r; xx++) {
+        int d = xx*xx + yy*yy;
+        if (d <= r2 && d >= rin) { if (!(xx > 0 && yy < 0 && (-yy) < xx)) kfb_px(cx + xx, cy + yy, v); }
+    }
+    kfb_line(cx + r - 1, cy - 1, cx + r - 9, cy - 4, v, 2);
+    kfb_line(cx + r - 1, cy - 1, cx + r - 3, cy + 8, v, 2);
+}
+static void kfb_btnbox(int cx, int cy, int bw)
+{
+    int x = cx - bw/2, y = cy - bw/2;
+    kfb_fill(x, y, bw, 1, 0xC8); kfb_fill(x, y + bw - 1, bw, 1, 0xC8);
+    kfb_fill(x, y, 1, bw, 0xC8); kfb_fill(x + bw - 1, y, 1, bw, 0xC8);
+}
+static void kfb_text(int x, int y, const char *str, int xmax)
+{
+    const unsigned char *p = (const unsigned char *)str;
+    for (; *p; p++) {
+        int c = *p, idx, row;
+        if (x + KFB_FONT_CW > xmax) break;
+        if (c < KFB_FONT_FIRST || c > 126) c = '?';
+        idx = c - KFB_FONT_FIRST;
+        for (row = 0; row < KFB_FONT_CH; row++) {
+            unsigned short bits = kfb_font[idx][row];
+            int col; for (col = 0; col < KFB_FONT_CW; col++) if (bits & (1 << (KFB_FONT_CW - 1 - col))) kfb_px(x + col, y + row, 0x00);
+        }
+        x += KFB_FONT_CW;
+    }
+}
+/* gomb-geometria (a hittest és a rajzolás ugyanezt használja) */
+static int toolbar_hit(int px)
+{
+    int bw = 56, pad = 14, gap = 10;
+    int xback = pad, xfwd = pad + (bw + gap), xrel = pad + 2*(bw + gap);
+    int xclose = kfb_scrw - pad - bw, xmin = kfb_scrw - pad - (bw + gap) - bw;
+    if (px >= xback && px < xback + bw) return TB_BACK;
+    if (px >= xfwd  && px < xfwd  + bw) return TB_FWD;
+    if (px >= xrel  && px < xrel  + bw) return TB_RELOAD;
+    if (px >= xmin  && px < xmin  + bw) return TB_MIN;
+    if (px >= xclose&& px < xclose+ bw) return TB_CLOSE;
+    return TB_URL;
+}
+static void draw_toolbar(nsfb_t *nsfb, int do_update)
+{
+    int bw = 56, pad = 14, gap = 10, cy = KFB_TBAR_H / 2;
+    int xback = pad + bw/2, xfwd = pad + (bw+gap) + bw/2, xrel = pad + 2*(bw+gap) + bw/2;
+    int xclose = kfb_scrw - pad - bw/2, xmin = kfb_scrw - pad - (bw+gap) - bw/2;
+    int urlx0 = xrel + bw/2 + 18, urlx1 = xmin - bw/2 - 18;
+    UNUSED(nsfb);
+    if (kfb_mem == NULL) return;
+    kfb_fill(0, 0, kfb_scrw, KFB_TBAR_H, 0xFF);            /* fehér háttér */
+    kfb_fill(0, KFB_TBAR_H - 2, kfb_scrw, 2, 0x40);        /* alsó szegély */
+    kfb_btnbox(xback, cy, bw); kfb_btnbox(xfwd, cy, bw); kfb_btnbox(xrel, cy, bw);
+    kfb_btnbox(xmin, cy, bw);  kfb_btnbox(xclose, cy, bw);
+    kfb_tri_left(xback, cy, 13, 0x00);
+    kfb_tri_right(xfwd, cy, 13, 0x00);
+    kfb_reload(xrel, cy, 14, 0x00);
+    kfb_fill(xmin - 14, cy + 9, 28, 5, 0x00);              /* '_' minimalizál */
+    kfb_line(xclose - 13, cy - 13, xclose + 13, cy + 13, 0x00, 3);  /* ✕ bezár */
+    kfb_line(xclose + 13, cy - 13, xclose - 13, cy + 13, 0x00, 3);
+    kfb_text(urlx0, (KFB_TBAR_H - KFB_FONT_CH) / 2, g_toolbar_url, urlx1);
+    if (do_update) kfb_mtk_update(0, 0, kfb_scrw, KFB_TBAR_H, 0);
+}
+
 /* a teljes megrajzolt kép (nsfb->ptr) újbóli kiírása a kijelzőre + teljes e-ink frissítés.
  * Folytatáskor (SIGCONT) hívjuk, amikor a KOReader közben átrajzolta a framebuffert. */
 static void full_reblit(nsfb_t *nsfb)
@@ -400,52 +631,42 @@ static void full_reblit(nsfb_t *nsfb)
     if (kfb_mem == NULL || nsfb->ptr == NULL) return;
     for (y = 0; y < nsfb->height; y++) {
         const uint32_t *src = (const uint32_t *)(nsfb->ptr + (size_t)y * nsfb->linelen);
-        uint8_t *dst = kfb_mem + (size_t)y * kfb_linelen;
+        uint8_t *dst = kfb_mem + (size_t)(y + KFB_TBAR_H) * kfb_linelen;
+        int gi; for (gi = 0; gi < KFB_GUTTER; gi++) dst[gi] = 0xFF;
         for (x = 0; x < nsfb->width; x++) {
             uint32_t p = src[x];
             int r =  p        & 0xFF;
             int g = (p >> 8)  & 0xFF;
             int b = (p >> 16) & 0xFF;
-            dst[x] = (uint8_t)((r * 77 + g * 151 + b * 28) >> 8);
+            dst[x + KFB_GUTTER] = (uint8_t)((r * 77 + g * 151 + b * 28) >> 8);
         }
     }
-    if (mtk_ok) {
-        struct mtk_update_data u;
-        memset(&u, 0, sizeof(u));
-        u.update_region.left   = 0;
-        u.update_region.top    = 0;
-        u.update_region.width  = (uint32_t)nsfb->width;
-        u.update_region.height = (uint32_t)nsfb->height;
-        u.waveform_mode = MTK_WAVEFORM_GC16;   /* teljes, tiszta frissítés */
-        u.update_mode   = MTK_UPDATE_FULL;
-        u.update_marker = ++mtk_marker;
-        u.temp          = MTK_TEMP_AMBIENT;
-        if (ioctl(kfb_fd, MXCFB_SEND_UPDATE_MTK, &u) < 0) mtk_ok = 0;
-    }
+    draw_toolbar(nsfb, 0);                       /* a sávot is újrarajzoljuk */
+    kfb_mtk_update(0, 0, kfb_scrw, kfb_scrh, 1); /* egyetlen teljes, tiszta frissítés */
 }
 
-/* a böngésző "minimalizálása": elengedjük az érintő kizárólagos foglalását (hogy a
- * KOReader visszakapja), tiszta gesztus-állapotot hagyunk, majd megállítjuk magunkat
- * SIGSTOP-pal. A felügyelő szkript észleli a megállást és visszaadja a vezérlést a
- * KOReadernek. SIGCONT-ra pontosan innen folytatódik a futás. */
-static void minimize_self(nsfb_t *nsfb)
+static void minimize_self(nsfb_t *nsfb, int reason)
 {
+    const char *sig = getenv("NETSURF_SIGNAL_FILE");
+    if (sig != NULL && sig[0] != 0) {
+        FILE *f = fopen(sig, "w");
+        if (f != NULL) { fputs(reason == 1 ? "menu" : reason == 2 ? "url" : reason == 3 ? "field" : "min", f); fputc('\n', f); fclose(f); }
+    }
     if (ts_fd >= 0) ioctl(ts_fd, EVIOCGRAB, (void *)0);   /* grab elengedése */
     g_down = 0; g_scrolling = 0; pinch_on = 0;
     frame_down = -1; have_x = have_y = 0;
     sl_active[0] = sl_active[1] = 0;
-    ktlog("minimalizalas: SIGSTOP");
+    ktlog("minimalizalas (reason=%d): SIGSTOP", reason);
     fflush(NULL);
     raise(SIGSTOP);                 /* --- ide fagyunk; SIGCONT folytatja innen --- */
-    /* felébredés (a veremkeret megmaradt, ezért itt folytatódunk) */
     if (ts_fd >= 0) {
         struct input_event d;
-        ioctl(ts_fd, EVIOCGRAB, (void *)1);               /* grab vissza */
-        while (read(ts_fd, &d, sizeof(d)) == (ssize_t)sizeof(d)) { }  /* elévült események eldobása */
+        ioctl(ts_fd, EVIOCGRAB, (void *)1);
+        while (read(ts_fd, &d, sizeof(d)) == (ssize_t)sizeof(d)) { }
     }
-    /* azonnali teljes újrarajzolás, nem várva a következő érintésre */
     full_reblit(nsfb);
-    g_resumed = 0;                  /* már újrarajzoltunk; a tartalék útvonal ne duplázza */
+    g_resumed = 0;
+    if (reason == 3) g_inject_request = 1;   /* mező: a fő ciklus injektálja a beírt szöveget */
     ktlog("folytatas: SIGCONT");
 }
 
@@ -575,37 +796,32 @@ static void ts_process_frame(nsfb_t *nsfb)
     if (nact >= 2) {
         int px = sl_x[0] - sl_x[1]; if (px < 0) px = -px;
         int py = sl_y[0] - sl_y[1]; if (py < 0) py = -py;
-        int d = px + py;            /* Manhattan-távolság (elég a pinch-hez) */
+        int d = px + py;
         if (!pinch_on) {
             pinch_on = 1;
-            g_down = 0; g_scrolling = 0;   /* a sima gesztus megszakítása */
+            g_down = 0; g_scrolling = 0;
             pinch_last = d;
         } else {
             int delta = d - pinch_last;
             int steps = 0;
-            while (delta >= PINCH_STEP && steps < 3) {     /* széthúzás -> nagyítás */
-                emit_zoom(1); pinch_last += PINCH_STEP; delta -= PINCH_STEP; steps++;
-            }
-            while (delta <= -PINCH_STEP && steps < 3) {    /* csippentés -> kicsinyítés */
-                emit_zoom(0); pinch_last -= PINCH_STEP; delta += PINCH_STEP; steps++;
-            }
+            while (delta >= PINCH_STEP && steps < 3) { emit_zoom(1); pinch_last += PINCH_STEP; delta -= PINCH_STEP; steps++; }
+            while (delta <= -PINCH_STEP && steps < 3) { emit_zoom(0); pinch_last -= PINCH_STEP; delta += PINCH_STEP; steps++; }
         }
         frame_down = -1; have_x = have_y = 0;
         return;
     }
     if (pinch_on) {
-        /* kilépés a pinchből (ujjak felemelve) – ne legyen belőle kattintás */
         pinch_on = 0; g_down = 0;
         frame_down = -1; have_x = have_y = 0;
         return;
     }
 
-    /* skálázás a kijelzőre */
-    sx = scale(raw_x, ts_min_x, ts_max_x, nsfb->width);
-    sy = scale(raw_y, ts_min_y, ts_max_y, nsfb->height);
+    /* skálázás a FIZIKAI kijelzőre */
+    sx = scale(raw_x, ts_min_x, ts_max_x, kfb_scrw);
+    sy = scale(raw_y, ts_min_y, ts_max_y, kfb_scrh);
     if (ts_swap) { tmp = sx; sx = sy; sy = tmp; }
-    if (ts_invx) sx = nsfb->width  - 1 - sx;
-    if (ts_invy) sy = nsfb->height - 1 - sy;
+    if (ts_invx) sx = kfb_scrw - 1 - sx;
+    if (ts_invy) sy = kfb_scrh - 1 - sy;
 
     /* lenyomás kezdete */
     if (frame_down == 1 && !g_down) {
@@ -622,47 +838,40 @@ static void ts_process_frame(nsfb_t *nsfb)
         dy = sy - g_last_y;
         g_moved += (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
 
-        /* FELSŐ ÉL LEHÚZÁSA -> minimalizálás. A képernyő tetejéről induló, túlnyomóan
-         * függőleges, lefelé irányuló húzás. A minimalizálás után (SIGCONT) tiszta
-         * lappal térünk vissza, ezért itt kilépünk a feldolgozásból. */
-        if (!g_min_fired && g_start_y <= TOP_EDGE_PX) {
+        /* eszköztárból lefelé húzás -> minimalizálás (és a KOReader menü megnyitása) */
+        if (!g_min_fired && g_start_y < KFB_TBAR_H) {
             int ddown = sy - g_start_y;
             int dhoriz = sx - g_start_x; if (dhoriz < 0) dhoriz = -dhoriz;
             if (ddown >= TOP_DRAG_TRIGGER && ddown > dhoriz) {
                 g_min_fired = 1;
-                minimize_self(nsfb);
+                minimize_self(nsfb, 1);
                 frame_down = -1; have_x = have_y = 0;
                 return;
             }
         }
-        if (!g_scrolling && g_moved > TAP_MAX_MOVE) {
-            g_scrolling = 1;
-            g_scroll_accum = 0;
-            g_scroll_accx = 0;
-        }
-        if (g_scrolling) {
-            g_scroll_accum += dy;
-            nscroll = 0;
-            /* ujj felfelé (dy<0) -> tartalom lefelé gördül -> MOUSE_5 */
-            while (g_scroll_accum <= -SCROLL_STEP && nscroll < SCROLL_MAX_PER_FRAME) {
-                evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_MOUSE_5);
-                g_scroll_accum += SCROLL_STEP; nscroll++;
+
+        /* tartalom görgetése CSAK ha a tartalomban (a sáv alatt) kezdtünk */
+        if (g_start_y >= KFB_TBAR_H) {
+            if (!g_scrolling && g_moved > TAP_MAX_MOVE) {
+                g_scrolling = 1; g_scroll_accum = 0; g_scroll_accx = 0;
             }
-            while (g_scroll_accum >= SCROLL_STEP && nscroll < SCROLL_MAX_PER_FRAME) {
-                evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_MOUSE_4);
-                g_scroll_accum -= SCROLL_STEP; nscroll++;
-            }
-            /* VÍZSZINTES húzás (pl. rázoomolt oldalon): LEFT/RIGHT billentyűk */
-            g_scroll_accx += dx;
-            nsc2 = 0;
-            /* ujj jobbra (dx>0) -> tartalom jobbra gördül -> balra görgetés -> LEFT */
-            while (g_scroll_accx >= SCROLL_STEP && nsc2 < SCROLL_MAX_PER_FRAME) {
-                evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_LEFT);
-                g_scroll_accx -= SCROLL_STEP; nsc2++;
-            }
-            while (g_scroll_accx <= -SCROLL_STEP && nsc2 < SCROLL_MAX_PER_FRAME) {
-                evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_RIGHT);
-                g_scroll_accx += SCROLL_STEP; nsc2++;
+            if (g_scrolling) {
+                g_scroll_accum += dy;
+                nscroll = 0;
+                while (g_scroll_accum <= -SCROLL_STEP && nscroll < SCROLL_MAX_PER_FRAME) {
+                    evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_MOUSE_5); g_scroll_accum += SCROLL_STEP; nscroll++;
+                }
+                while (g_scroll_accum >= SCROLL_STEP && nscroll < SCROLL_MAX_PER_FRAME) {
+                    evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_MOUSE_4); g_scroll_accum -= SCROLL_STEP; nscroll++;
+                }
+                g_scroll_accx += dx;
+                nsc2 = 0;
+                while (g_scroll_accx >= SCROLL_STEP && nsc2 < SCROLL_MAX_PER_FRAME) {
+                    evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_LEFT); g_scroll_accx -= SCROLL_STEP; nsc2++;
+                }
+                while (g_scroll_accx <= -SCROLL_STEP && nsc2 < SCROLL_MAX_PER_FRAME) {
+                    evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_RIGHT); g_scroll_accx += SCROLL_STEP; nsc2++;
+                }
             }
         }
         g_last_x = sx; g_last_y = sy;
@@ -670,16 +879,36 @@ static void ts_process_frame(nsfb_t *nsfb)
 
     /* elengedés */
     if (frame_down == 0 && g_down) {
-        if (!g_scrolling) {
-            /* koppintás -> kattintás a kezdőponton */
-            evq_push_move(g_start_x, g_start_y);
+        if (g_start_y < KFB_TBAR_H) {
+            /* eszköztár-koppintás (nem húzás): a megfelelő gomb */
+            if (!g_scrolling && !g_min_fired) {
+                switch (toolbar_hit(g_start_x)) {
+                    case TB_BACK:   g_nav_request = 1; break;
+                    case TB_FWD:    g_nav_request = 2; break;
+                    case TB_RELOAD: g_nav_request = 3; break;
+                    case TB_MIN:    minimize_self(nsfb, 0); break;
+                    case TB_CLOSE:  g_nav_request = 4; break;
+                    case TB_URL:    minimize_self(nsfb, 2); break;
+                    default: break;
+                }
+            }
+        } else if (!g_scrolling) {
+            /* tartalmi koppintás -> kattintás (gutter/sáv eltolással) */
+            int cx = g_start_x - KFB_GUTTER, cy = g_start_y - KFB_TBAR_H;
+            if (cx < 0) cx = 0;
+            if (cx > nsfb->width - 1)  cx = nsfb->width - 1;
+            if (cy < 0) cy = 0;
+            if (cy > nsfb->height - 1) cy = nsfb->height - 1;
+            /* ha a koppintás beviteli mezőbe talál, a place_caret ebből tudja,
+             * hogy ez user-koppintás -> KOReader billentyűzet (nem automatikus fókusz) */
+            g_field_click_pending = 4;
+            evq_push_move(cx, cy);
             evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_MOUSE_1);
             evq_push_key(NSFB_EVENT_KEY_UP, NSFB_KEY_MOUSE_1);
         }
         g_down = 0;
     }
 
-    /* frame állapot nullázása a következőhöz */
     frame_down = -1;
     have_x = have_y = 0;
 }
@@ -698,6 +927,18 @@ static bool kindle_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
     if (g_resumed) {
         g_resumed = 0;
         full_reblit(nsfb);
+    }
+
+    /* eszköztár újrarajzolása, ha az URL megváltozott (vagy az első hívásnál) */
+    if (g_toolbar_url_dirty) {
+        g_toolbar_url_dirty = 0;
+        draw_toolbar(nsfb, 1);
+    }
+
+    /* oldalon belüli mező fókuszba került -> KOReader billentyűzet */
+    if (g_field_input_request) {
+        g_field_input_request = 0;
+        minimize_self(nsfb, 3);
     }
 
     /* először a sorban álló eseményt adjuk vissza */
@@ -1099,15 +1340,15 @@ anc = ("\tfb_queue_redraw(g->browser,\n"
        "\t\t\tx + 1 - bwidget->scrollx,\n"
        "\t\t\ty + height - bwidget->scrolly);\n"
        "}")
-new = anc[:-1] + "\n\tmap_osk();\n}"
+new = anc[:-1] + ("\n\tif (g_field_click_pending > 0) { g_field_input_request = 1; g_field_click_pending = 0; }\n}")
 if anc in s:
     s = s.replace(anc, new, 1)
     open(p, "w").write(s)
-    sys.stderr.write("place_caret -> map_osk beszurva\n")
+    sys.stderr.write("place_caret -> KOReader billentyuzet kivalto beszurva\n")
 else:
     sys.stderr.write("FIGYELEM: place_caret horgony nem talalhato\n")
 PYCARET
-grep -q "map_osk();" "$SRC/netsurf/frontends/framebuffer/gui.c" && echo "   mezo-fokusz billentyűzet patch OK" || echo "   (mezo-fokusz patch kimaradt)"
+grep -q "g_field_input_request = 1" "$SRC/netsurf/frontends/framebuffer/gui.c" && echo "   mezo-fokusz (KOReader) patch OK" || { echo "HIBA: mezo-fokusz patch nem sikerult"; exit 1; }
 
 # 2l) LETÖLTÉS-KEZELŐ a framebuffer frontendhez (hiányzik belőle): fájlba menti a
 #     letöltött fájlt a NETSURF_DOWNLOAD_DIR mappába, és a NETSURF_DL_LIST listába írja.
@@ -1201,6 +1442,88 @@ sys.stderr.write("Letoltes-kezelo beszurva a fb frontendbe\n")
 PYDL
 grep -q "framebuffer_download_table" "$SRC/netsurf/frontends/framebuffer/gui.c" \
   && echo "   letöltés-kezelő patch OK" || { echo "HIBA: letöltés-kezelő patch nem sikerült"; exit 1; }
+
+# 2p) SAJÁT ESZKÖZTÁR: a felület (kindlefb.c) rajzolja a felső sávot és állítja a
+#     g_nav_request / g_toolbar_url jelzőket. A gui.c-nek három dolgot kell tennie:
+#      - extern deklarációk a megosztott jelzőkhöz,
+#      - a fő ciklusban a vissza/előre/újratöltés/bezárás kérelmek kezelése,
+#      - az URL megváltozásakor átmásolni a címet a saját sáv számára (és NULL-védelem,
+#        mert a natív eszköztárat kikapcsoljuk, így g->url lehet NULL).
+python3 - "$SRC/netsurf/frontends/framebuffer/gui.c" <<'PYTB'
+import sys
+p = sys.argv[1]; s = open(p).read()
+
+a1 = "static bool fb_complete = false;\n"
+if a1 not in s:
+    sys.stderr.write("TB-PATCH HIBA: fb_complete horgony nem talalhato\n"); sys.exit(2)
+add1 = a1 + ('#include <signal.h>\n'
+             'extern char g_toolbar_url[1024];\n'
+             'extern volatile sig_atomic_t g_toolbar_url_dirty;\n'
+             'extern volatile sig_atomic_t g_nav_request;\n'
+             'extern volatile sig_atomic_t g_field_click_pending;\n'
+             'extern volatile sig_atomic_t g_field_input_request;\n'
+             'extern volatile sig_atomic_t g_inject_request;\n')
+s = s.replace(a1, add1, 1)
+
+a2 = "\twhile (fb_complete != true) {\n"
+if a2 not in s:
+    sys.stderr.write("TB-PATCH HIBA: fo ciklus horgony nem talalhato\n"); sys.exit(2)
+h2 = ("\t\tif (g_nav_request != 0) {\n"
+      "\t\t\tint _r = g_nav_request; g_nav_request = 0;\n"
+      "\t\t\tif (window_list != NULL && window_list->bw != NULL) {\n"
+      "\t\t\t\tif (_r == 1) browser_window_history_back(window_list->bw, false);\n"
+      "\t\t\t\telse if (_r == 2) browser_window_history_forward(window_list->bw, false);\n"
+      "\t\t\t\telse if (_r == 3) browser_window_reload(window_list->bw, true);\n"
+      "\t\t\t\telse if (_r == 4) fb_complete = true;\n"
+      "\t\t\t}\n"
+      "\t\t}\n"
+      "\t\tif (g_field_click_pending > 0) g_field_click_pending--;\n"
+      "\t\tif (g_inject_request != 0) {\n"
+      "\t\t\tg_inject_request = 0;\n"
+      "\t\t\tif (window_list != NULL && window_list->bw != NULL) {\n"
+      "\t\t\t\tconst char *_if = getenv(\"NETSURF_INJECT_FILE\");\n"
+      "\t\t\t\tif (_if != NULL && _if[0] != 0) {\n"
+      "\t\t\t\t\tFILE *_f = fopen(_if, \"rb\");\n"
+      "\t\t\t\t\tif (_f != NULL) {\n"
+      "\t\t\t\t\t\tint _ch; uint32_t _cp = 0; int _need = 0;\n"
+      "\t\t\t\t\t\twhile ((_ch = fgetc(_f)) != EOF) {\n"
+      "\t\t\t\t\t\t\tunsigned char _b = (unsigned char)_ch;\n"
+      "\t\t\t\t\t\t\tif (_need == 0) {\n"
+      "\t\t\t\t\t\t\t\tif (_b == '\\n' || _b == '\\r') continue;\n"
+      "\t\t\t\t\t\t\t\tif (_b < 0x80) { browser_window_key_press(window_list->bw, _b); }\n"
+      "\t\t\t\t\t\t\t\telse if ((_b & 0xE0) == 0xC0) { _cp = _b & 0x1F; _need = 1; }\n"
+      "\t\t\t\t\t\t\t\telse if ((_b & 0xF0) == 0xE0) { _cp = _b & 0x0F; _need = 2; }\n"
+      "\t\t\t\t\t\t\t\telse if ((_b & 0xF8) == 0xF0) { _cp = _b & 0x07; _need = 3; }\n"
+      "\t\t\t\t\t\t\t\telse { _need = 0; }\n"
+      "\t\t\t\t\t\t\t} else {\n"
+      "\t\t\t\t\t\t\t\tif ((_b & 0xC0) == 0x80) { _cp = (_cp << 6) | (_b & 0x3F); _need--; if (_need == 0) browser_window_key_press(window_list->bw, _cp); }\n"
+      "\t\t\t\t\t\t\t\telse { _need = 0; }\n"
+      "\t\t\t\t\t\t\t}\n"
+      "\t\t\t\t\t\t}\n"
+      "\t\t\t\t\t\tfclose(_f); remove(_if);\n"
+      "\t\t\t\t\t}\n"
+      "\t\t\t\t}\n"
+      "\t\t\t}\n"
+      "\t\t}\n")
+s = s.replace(a2, a2 + h2, 1)
+
+a3 = "\tfbtk_set_text(g->url, nsurl_access(url));\n"
+if a3 not in s:
+    sys.stderr.write("TB-PATCH HIBA: set_url horgony nem talalhato\n"); sys.exit(2)
+h3 = ("\t{ const char *_u = nsurl_access(url);\n"
+      "\t  strncpy(g_toolbar_url, _u ? _u : \"\", sizeof(g_toolbar_url) - 1);\n"
+      "\t  g_toolbar_url[sizeof(g_toolbar_url) - 1] = 0; g_toolbar_url_dirty = 1;\n"
+      "\t  { const char *_hf = getenv(\"NETSURF_HISTORY_FILE\");\n"
+      "\t    if (_hf != NULL && _hf[0] != 0 && _u != NULL && _u[0] != 0 && strncmp(_u, \"about:\", 6) != 0) {\n"
+      "\t      FILE *_h = fopen(_hf, \"a\"); if (_h != NULL) { fputs(_u, _h); fputc('\\n', _h); fclose(_h); } } } }\n"
+      "\tif (g->url != NULL) fbtk_set_text(g->url, nsurl_access(url));\n")
+s = s.replace(a3, h3, 1)
+
+open(p, "w").write(s)
+sys.stderr.write("Sajat eszkoztar patch beszurva a gui.c-be\n")
+PYTB
+grep -q "g_nav_request" "$SRC/netsurf/frontends/framebuffer/gui.c" \
+  && echo "   saját eszköztár (gui.c) patch OK" || { echo "HIBA: saját eszköztár patch nem sikerült"; exit 1; }
 
 # 3) NetSurf, framebuffer frontend, linux felület (/dev/fb + /dev/input), JS (duktape)
 echo "==> netsurf (framebuffer)"
