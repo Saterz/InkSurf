@@ -367,8 +367,9 @@ static int   pinch_on = 0;
 static int   pinch_last = 0;
 #define PINCH_STEP 60        /* ennyi nyers távolság-változás = egy zoom-lépés */
 
-/* kis esemény-sor, mert a felület hívásonként egy eseményt adhat vissza */
-#define EVQ_SIZE 64
+/* kis esemény-sor, mert a felület hívásonként egy eseményt adhat vissza
+ * (nagyobb, hogy a mezőbe injektált hosszabb szöveg is elférjen) */
+#define EVQ_SIZE 1024
 static nsfb_event_t evq[EVQ_SIZE];
 static int evq_head = 0, evq_tail = 0;
 
@@ -679,7 +680,38 @@ static void minimize_self(nsfb_t *nsfb, int reason)
     }
     full_reblit(nsfb);
     g_resumed = 0;
-    if (reason == 3) g_inject_request = 1;   /* mező: a fő ciklus injektálja a beírt szöveget */
+    /* MEZŐBE INJEKTÁLÁS: a KOReader-ablakba beírt szöveget VALÓDI billentyű-
+     * eseményként küldjük be (ugyanaz az útvonal, mint a billentyűzeté). Az
+     * ékezet-patch "közvetlen Unicode" tartományát használjuk: 0x2000+kódpont. */
+    if (reason == 3) {
+        const char *inj = getenv("NETSURF_INJECT_FILE");
+        if (inj != NULL && inj[0] != 0) {
+            FILE *f = fopen(inj, "rb");
+            if (f != NULL) {
+                int c; unsigned int cp = 0; int need = 0;
+                while ((c = fgetc(f)) != EOF) {
+                    unsigned char b = (unsigned char)c;
+                    unsigned int out = 0; int have = 0;
+                    if (need == 0) {
+                        if (b == '\n' || b == '\r') continue;
+                        if (b < 0x80) { out = b; have = 1; }
+                        else if ((b & 0xE0) == 0xC0) { cp = b & 0x1F; need = 1; }
+                        else if ((b & 0xF0) == 0xE0) { cp = b & 0x0F; need = 2; }
+                        else if ((b & 0xF8) == 0xF0) { cp = b & 0x07; need = 3; }
+                        else { need = 0; }
+                    } else {
+                        if ((b & 0xC0) == 0x80) { cp = (cp << 6) | (b & 0x3F); need--; if (need == 0) { out = cp; have = 1; } }
+                        else { need = 0; }
+                    }
+                    if (have && out >= 32) {
+                        evq_push_key(NSFB_EVENT_KEY_DOWN, (enum nsfb_key_code_e)(0x2000 + out));
+                    }
+                }
+                fclose(f);
+                remove(inj);
+            }
+        }
+    }
     ktlog("folytatas: SIGCONT");
 }
 
