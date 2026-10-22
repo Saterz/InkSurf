@@ -850,6 +850,57 @@ else:
 PYOSK
 grep -q "map_osk();" "$SRC/netsurf/frontends/framebuffer/fbtk/text.c" && echo "   auto-billentyűzet patch OK" || echo "   (auto-billentyűzet patch kimaradt)"
 
+# 2m) Billentyűzet: a shift legyen RAGADÓS (caps lock) – különben nincs nagybetű
+python3 - "$SRC/netsurf/frontends/framebuffer/fbtk/osk.c" <<'PYSHIFT'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = '''static int
+osk_click(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+{
+\tnsfb_event_t event;
+\tstruct kbd_button_s *kbd_button = cbi->context;
+
+\tevent.type = cbi->event->type;
+\tevent.value.keycode = kbd_button->keycode;
+\tfbtk_input(widget, &event);
+
+\treturn 0;
+}'''
+new = '''static int osk_caps = 0;
+static int
+osk_click(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+{
+\tnsfb_event_t event;
+\tstruct kbd_button_s *kbd_button = cbi->context;
+
+\t/* Shift = ragados valto (caps lock): tartja a modositot, amig ujra meg nem nyomjak */
+\tif (kbd_button->keycode == NSFB_KEY_LSHIFT ||
+\t    kbd_button->keycode == NSFB_KEY_RSHIFT) {
+\t\tif (cbi->event->type == NSFB_EVENT_KEY_DOWN) {
+\t\t\tosk_caps = !osk_caps;
+\t\t\tevent.type = osk_caps ? NSFB_EVENT_KEY_DOWN : NSFB_EVENT_KEY_UP;
+\t\t\tevent.value.keycode = NSFB_KEY_LSHIFT;
+\t\t\tfbtk_input(widget, &event);
+\t\t}
+\t\treturn 0;
+\t}
+
+\tevent.type = cbi->event->type;
+\tevent.value.keycode = kbd_button->keycode;
+\tfbtk_input(widget, &event);
+
+\treturn 0;
+}'''
+if old in s:
+    s = s.replace(old, new)
+    open(p, "w").write(s)
+    sys.stderr.write("OSK shift-toggle beszurva\\n")
+else:
+    sys.stderr.write("FIGYELEM: osk_click horgony nem talalhato (shift patch kimaradt)\\n")
+PYSHIFT
+grep -q "osk_caps" "$SRC/netsurf/frontends/framebuffer/fbtk/osk.c" && echo "   shift (caps lock) patch OK" || echo "   (shift patch kimaradt)"
+
 # 2l) LETÖLTÉS-KEZELŐ a framebuffer frontendhez (hiányzik belőle): fájlba menti a
 #     letöltött fájlt a NETSURF_DOWNLOAD_DIR mappába, és a NETSURF_DL_LIST listába írja.
 python3 - "$SRC/netsurf/frontends/framebuffer/gui.c" <<'PYDL'
@@ -871,7 +922,7 @@ fb_kindle_download_create(download_context *ctx, struct gui_window *parent)
 	char cmd[1200];
 	char *p;
 	(void) parent;
-	if (dir == NULL || dir[0] == 0) dir = "/mnt/us/documents/Downloads";
+	if (dir == NULL || dir[0] == 0) dir = "/mnt/us/koreader/documents";
 	if (fn != NULL && fn[0] != 0) { strncpy(name, fn, sizeof(name) - 1); name[sizeof(name) - 1] = 0; }
 	else { snprintf(name, sizeof(name), "letoltes-%ld", (long) time(NULL)); }
 	for (p = name; *p != 0; p++) { if (*p == '/' || *p == '\\') *p = '_'; }
@@ -983,15 +1034,20 @@ if [ ! -d "$ROOT/libmobi" ]; then
   git clone --depth 1 https://github.com/bfabiszewski/libmobi "$ROOT/libmobi" || true
 fi
 if [ -d "$ROOT/libmobi" ]; then
+  # a teljes libmobi-build kimenetét a naplóba mentjük (az artifactba is bekerül)
   ( cd "$ROOT/libmobi" && \
     ./autogen.sh && \
     ./configure --host="$TARGET_TUPLE" --prefix="$PREFIX" \
-      --enable-static --disable-shared \
+      --enable-static --disable-shared --enable-tools \
       --with-zlib=no --with-libxml2=no && \
-    make -j"$JOBS" ) || echo "   FIGYELEM: libmobi fordítás hiba"
-  MOBITOOL_BIN="$(find "$ROOT/libmobi" -name mobitool -type f -perm -u+x | head -n1 || true)"
-  if [ -n "$MOBITOOL_BIN" ]; then
+    make -j"$JOBS" ) > "$OUT/libmobi-build.log" 2>&1 || echo "   FIGYELEM: libmobi fordítás hiba (lásd libmobi-build.log)"
+  # a libtool az IGAZI ELF binárist a .libs/ alá teszi; azt keressük elsőként
+  MOBITOOL_BIN="$(find "$ROOT/libmobi" -path '*/.libs/mobitool' -type f 2>/dev/null | head -n1 || true)"
+  [ -n "$MOBITOOL_BIN" ] || MOBITOOL_BIN="$(find "$ROOT/libmobi" -name mobitool -type f 2>/dev/null | head -n1 || true)"
+  if [ -n "$MOBITOOL_BIN" ] && head -c4 "$MOBITOOL_BIN" | grep -q "ELF"; then
     cp "$MOBITOOL_BIN" "$OUT/mobitool" && "${CROSS}strip" "$OUT/mobitool" 2>/dev/null || true
+  else
+    echo "   (mobitool bináris nem ELF vagy nincs: $MOBITOOL_BIN)"
   fi
 fi
 [ -f "$OUT/mobitool" ] && echo "   mobitool kész: $(file "$OUT/mobitool" | cut -c1-50)" || echo "   FIGYELEM: mobitool nem épült (a konverzió kimarad)"
