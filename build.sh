@@ -1039,7 +1039,8 @@ if [ -d "$ROOT/libmobi" ]; then
     ./autogen.sh && \
     ./configure --host="$TARGET_TUPLE" --prefix="$PREFIX" \
       --enable-static --disable-shared --enable-tools \
-      --with-zlib=no --with-libxml2=no && \
+      --with-zlib=no --with-libxml2=no \
+      LDFLAGS="-Wl,--allow-multiple-definition" && \
     make -j"$JOBS" ) > "$OUT/libmobi-build.log" 2>&1 || echo "   FIGYELEM: libmobi fordítás hiba (lásd libmobi-build.log)"
   # a libtool az IGAZI ELF binárist a .libs/ alá teszi; azt keressük elsőként
   MOBITOOL_BIN="$(find "$ROOT/libmobi" -path '*/.libs/mobitool' -type f 2>/dev/null | head -n1 || true)"
