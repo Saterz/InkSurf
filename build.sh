@@ -222,6 +222,19 @@ static int   g_scroll_accum = 0;
 #define SCROLL_STEP  80      /* ennyi képpont húzás = egy görgetőlépés */
 #define SCROLL_MAX_PER_FRAME 4
 
+/* multitouch slotok a PINCH-ZOOMhoz (type B protokoll, ABS_MT_SLOT) */
+#ifndef ABS_MT_SLOT
+#define ABS_MT_SLOT 0x2f
+#endif
+#define NSLOTS 2
+static int   cur_slot = 0;
+static int   sl_active[NSLOTS] = {0, 0};
+static int   sl_x[NSLOTS] = {0, 0};
+static int   sl_y[NSLOTS] = {0, 0};
+static int   pinch_on = 0;
+static int   pinch_last = 0;
+#define PINCH_STEP 60        /* ennyi nyers távolság-változás = egy zoom-lépés */
+
 /* kis esemény-sor, mert a felület hívásonként egy eseményt adhat vissza */
 #define EVQ_SIZE 64
 static nsfb_event_t evq[EVQ_SIZE];
@@ -462,10 +475,50 @@ static int scale(int v, int mn, int mx, int screen)
     return s;
 }
 
+/* zoom-lépés kibocsátása a NetSurfnek (Ctrl + '+' nagyítás / Ctrl + '-' kicsinyítés) */
+static void emit_zoom(int zin)
+{
+    enum nsfb_key_code_e k = zin ? NSFB_KEY_EQUALS : NSFB_KEY_MINUS;
+    evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_LCTRL);
+    evq_push_key(NSFB_EVENT_KEY_DOWN, k);
+    evq_push_key(NSFB_EVENT_KEY_UP, k);
+    evq_push_key(NSFB_EVENT_KEY_UP, NSFB_KEY_LCTRL);
+}
+
 /* egy SYN_REPORT kiértékelése: a nyers állapotból nsfb eseményeket gyártunk */
 static void ts_process_frame(nsfb_t *nsfb)
 {
     int sx, sy, tmp, dx, dy, nscroll;
+    int nact = sl_active[0] + sl_active[1];
+
+    /* --- PINCH ZOOM: két ujj a kijelzőn --- */
+    if (nact >= 2) {
+        int px = sl_x[0] - sl_x[1]; if (px < 0) px = -px;
+        int py = sl_y[0] - sl_y[1]; if (py < 0) py = -py;
+        int d = px + py;            /* Manhattan-távolság (elég a pinch-hez) */
+        if (!pinch_on) {
+            pinch_on = 1;
+            g_down = 0; g_scrolling = 0;   /* a sima gesztus megszakítása */
+            pinch_last = d;
+        } else {
+            int delta = d - pinch_last;
+            int steps = 0;
+            while (delta >= PINCH_STEP && steps < 3) {     /* széthúzás -> nagyítás */
+                emit_zoom(1); pinch_last += PINCH_STEP; delta -= PINCH_STEP; steps++;
+            }
+            while (delta <= -PINCH_STEP && steps < 3) {    /* csippentés -> kicsinyítés */
+                emit_zoom(0); pinch_last -= PINCH_STEP; delta += PINCH_STEP; steps++;
+            }
+        }
+        frame_down = -1; have_x = have_y = 0;
+        return;
+    }
+    if (pinch_on) {
+        /* kilépés a pinchből (ujjak felemelve) – ne legyen belőle kattintás */
+        pinch_on = 0; g_down = 0;
+        frame_down = -1; have_x = have_y = 0;
+        return;
+    }
 
     /* skálázás a kijelzőre */
     sx = scale(raw_x, ts_min_x, ts_max_x, nsfb->width);
@@ -556,12 +609,22 @@ static bool kindle_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
         switch (iev.type) {
         case EV_ABS:
             switch (iev.code) {
-            case ABS_MT_POSITION_X: raw_x = iev.value; have_x = 1; break;
+            case ABS_MT_SLOT:
+                cur_slot = (iev.value >= 0 && iev.value < NSLOTS) ? iev.value : NSLOTS;
+                break;
+            case ABS_MT_POSITION_X:
+                raw_x = iev.value; have_x = 1;
+                if (cur_slot < NSLOTS) sl_x[cur_slot] = iev.value;
+                break;
             case ABS_X:             raw_x = iev.value; have_x = 1; break;
-            case ABS_MT_POSITION_Y: raw_y = iev.value; have_y = 1; break;
+            case ABS_MT_POSITION_Y:
+                raw_y = iev.value; have_y = 1;
+                if (cur_slot < NSLOTS) sl_y[cur_slot] = iev.value;
+                break;
             case ABS_Y:             raw_y = iev.value; have_y = 1; break;
             case ABS_MT_TRACKING_ID:
                 frame_down = (iev.value < 0) ? 0 : 1;
+                if (cur_slot < NSLOTS) sl_active[cur_slot] = (iev.value < 0) ? 0 : 1;
                 break;
             default: break;
             }
@@ -900,6 +963,35 @@ else:
     sys.stderr.write("FIGYELEM: osk_click horgony nem talalhato (shift patch kimaradt)\\n")
 PYSHIFT
 grep -q "osk_caps" "$SRC/netsurf/frontends/framebuffer/fbtk/osk.c" && echo "   shift (caps lock) patch OK" || echo "   (shift patch kimaradt)"
+
+# 2n) A képernyő-billentyűzet hibás gombjai: a "/" és "\" keycode fel van cserélve (csak e két
+#     gombon fordul elő), az aposztróf pedig "l"-t ad. Felcseréljük / javítjuk.
+OSKC="$SRC/netsurf/frontends/framebuffer/fbtk/osk.c"
+sed -i 's/NSFB_KEY_SLASH/__NSFBTMP__/g; s/NSFB_KEY_BACKSLASH/NSFB_KEY_SLASH/g; s/__NSFBTMP__/NSFB_KEY_BACKSLASH/g' "$OSKC"
+sed -i "s/\"'\", NSFB_KEY_l/\"'\", NSFB_KEY_QUOTE/" "$OSKC"
+echo "   OSK billentyű-javítások (perjel/aposztróf):"; grep -nE 'NSFB_KEY_QUOTE|"/", NSFB_KEY_SLASH' "$OSKC" | head
+
+# 2o) Oldali (HTML) mezőre koppintva is jöjjön fel a billentyűzet (map_osk a caret-elhelyezéskor;
+#     a map_osk() az fbtk.h-ban deklarálva van, amit a gui.c már include-ol)
+python3 - "$SRC/netsurf/frontends/framebuffer/gui.c" <<'PYCARET'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+anc = ("\tfb_queue_redraw(g->browser,\n"
+       "\t\t\tx - bwidget->scrollx,\n"
+       "\t\t\ty - bwidget->scrolly,\n"
+       "\t\t\tx + 1 - bwidget->scrollx,\n"
+       "\t\t\ty + height - bwidget->scrolly);\n"
+       "}")
+new = anc[:-1] + "\n\tmap_osk();\n}"
+if anc in s:
+    s = s.replace(anc, new, 1)
+    open(p, "w").write(s)
+    sys.stderr.write("place_caret -> map_osk beszurva\n")
+else:
+    sys.stderr.write("FIGYELEM: place_caret horgony nem talalhato\n")
+PYCARET
+grep -q "map_osk();" "$SRC/netsurf/frontends/framebuffer/gui.c" && echo "   mezo-fokusz billentyűzet patch OK" || echo "   (mezo-fokusz patch kimaradt)"
 
 # 2l) LETÖLTÉS-KEZELŐ a framebuffer frontendhez (hiányzik belőle): fájlba menti a
 #     letöltött fájlt a NETSURF_DOWNLOAD_DIR mappába, és a NETSURF_DL_LIST listába írja.
