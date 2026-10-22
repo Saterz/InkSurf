@@ -122,6 +122,7 @@ for lib in $TARGET_LIBS; do
 #include <sys/ioctl.h>
 #include <linux/fb.h>
 #include <linux/input.h>
+#include <signal.h>
 
 #include "libnsfb.h"
 #include "libnsfb_plot.h"
@@ -185,6 +186,13 @@ static int      mtk_ok = 1;          /* 0: az ioctl nem megy, marad az fbink hur
 static uint32_t mtk_marker = 0;
 static int      mtk_logged = 0;      /* az első ioctl eredményét naplózzuk */
 
+/* ---- minimalizálás (SIGSTOP) / folytatás (SIGCONT) ----
+ * A böngésző a háttérben "megfagy" (a KOReader ilyenkor visszakapja a képernyőt és
+ * az érintőt). Folytatáskor SIGCONT érkezik; a teljes 32bpp RAM-puffert (nsfb->ptr)
+ * újra kiírjuk a kijelzőre, mert a KOReader közben átrajzolta a framebuffert. */
+static volatile sig_atomic_t g_resumed = 0;   /* 1: SIGCONT után teljes újrarajzolás kell */
+static void on_sigcont(int sig) { (void)sig; g_resumed = 1; }
+
 /* ---- érintés (evdev) ---- */
 #ifndef ABS_MT_POSITION_X
 #define ABS_MT_POSITION_X 0x35
@@ -217,10 +225,14 @@ static int   g_last_x = 0,  g_last_y = 0;
 static int   g_moved = 0;
 static int   g_scrolling = 0;
 static int   g_scroll_accum = 0;
+static int   g_scroll_accx = 0;   /* vízszintes görgetés-gyűjtő */
+static int   g_min_fired = 0;     /* ebben a gesztusban már kiváltottuk a minimalizálást */
 
 #define TAP_MAX_MOVE 18      /* ennél kisebb elmozdulás: koppintás */
 #define SCROLL_STEP  80      /* ennyi képpont húzás = egy görgetőlépés */
 #define SCROLL_MAX_PER_FRAME 4
+#define TOP_EDGE_PX      70  /* a felső élnek számító sáv magassága */
+#define TOP_DRAG_TRIGGER 160 /* ennyit lefelé húzva a felső élről -> minimalizálás */
 
 /* multitouch slotok a PINCH-ZOOMhoz (type B protokoll, ABS_MT_SLOT) */
 #ifndef ABS_MT_SLOT
@@ -305,6 +317,17 @@ static int kindle_initialise(nsfb_t *nsfb)
         munmap(kfb_mem, kfb_memlen); kfb_mem = NULL; close(kfb_fd); kfb_fd = -1;
         return -1;
     }
+
+    /* SIGCONT-kezelő: a minimalizálás utáni folytatáskor jelezzük, hogy teljes
+     * újrarajzolás kell. SA_RESTART, hogy a megszakított poll/read folytatódjon. */
+    {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = on_sigcont;
+        sa.sa_flags = SA_RESTART;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGCONT, &sa, NULL);
+    }
     return 0;
 }
 
@@ -367,6 +390,63 @@ static int kindle_update(nsfb_t *nsfb, nsfb_bbox_t *box)
         }
     }
     return 0;
+}
+
+/* a teljes megrajzolt kép (nsfb->ptr) újbóli kiírása a kijelzőre + teljes e-ink frissítés.
+ * Folytatáskor (SIGCONT) hívjuk, amikor a KOReader közben átrajzolta a framebuffert. */
+static void full_reblit(nsfb_t *nsfb)
+{
+    int x, y;
+    if (kfb_mem == NULL || nsfb->ptr == NULL) return;
+    for (y = 0; y < nsfb->height; y++) {
+        const uint32_t *src = (const uint32_t *)(nsfb->ptr + (size_t)y * nsfb->linelen);
+        uint8_t *dst = kfb_mem + (size_t)y * kfb_linelen;
+        for (x = 0; x < nsfb->width; x++) {
+            uint32_t p = src[x];
+            int r =  p        & 0xFF;
+            int g = (p >> 8)  & 0xFF;
+            int b = (p >> 16) & 0xFF;
+            dst[x] = (uint8_t)((r * 77 + g * 151 + b * 28) >> 8);
+        }
+    }
+    if (mtk_ok) {
+        struct mtk_update_data u;
+        memset(&u, 0, sizeof(u));
+        u.update_region.left   = 0;
+        u.update_region.top    = 0;
+        u.update_region.width  = (uint32_t)nsfb->width;
+        u.update_region.height = (uint32_t)nsfb->height;
+        u.waveform_mode = MTK_WAVEFORM_GC16;   /* teljes, tiszta frissítés */
+        u.update_mode   = MTK_UPDATE_FULL;
+        u.update_marker = ++mtk_marker;
+        u.temp          = MTK_TEMP_AMBIENT;
+        if (ioctl(kfb_fd, MXCFB_SEND_UPDATE_MTK, &u) < 0) mtk_ok = 0;
+    }
+}
+
+/* a böngésző "minimalizálása": elengedjük az érintő kizárólagos foglalását (hogy a
+ * KOReader visszakapja), tiszta gesztus-állapotot hagyunk, majd megállítjuk magunkat
+ * SIGSTOP-pal. A felügyelő szkript észleli a megállást és visszaadja a vezérlést a
+ * KOReadernek. SIGCONT-ra pontosan innen folytatódik a futás. */
+static void minimize_self(nsfb_t *nsfb)
+{
+    if (ts_fd >= 0) ioctl(ts_fd, EVIOCGRAB, (void *)0);   /* grab elengedése */
+    g_down = 0; g_scrolling = 0; pinch_on = 0;
+    frame_down = -1; have_x = have_y = 0;
+    sl_active[0] = sl_active[1] = 0;
+    ktlog("minimalizalas: SIGSTOP");
+    fflush(NULL);
+    raise(SIGSTOP);                 /* --- ide fagyunk; SIGCONT folytatja innen --- */
+    /* felébredés (a veremkeret megmaradt, ezért itt folytatódunk) */
+    if (ts_fd >= 0) {
+        struct input_event d;
+        ioctl(ts_fd, EVIOCGRAB, (void *)1);               /* grab vissza */
+        while (read(ts_fd, &d, sizeof(d)) == (ssize_t)sizeof(d)) { }  /* elévült események eldobása */
+    }
+    /* azonnali teljes újrarajzolás, nem várva a következő érintésre */
+    full_reblit(nsfb);
+    g_resumed = 0;                  /* már újrarajzoltunk; a tartalék útvonal ne duplázza */
+    ktlog("folytatas: SIGCONT");
 }
 
 static int kindle_finalise(nsfb_t *nsfb)
@@ -488,7 +568,7 @@ static void emit_zoom(int zin)
 /* egy SYN_REPORT kiértékelése: a nyers állapotból nsfb eseményeket gyártunk */
 static void ts_process_frame(nsfb_t *nsfb)
 {
-    int sx, sy, tmp, dx, dy, nscroll;
+    int sx, sy, tmp, dx, dy, nscroll, nsc2;
     int nact = sl_active[0] + sl_active[1];
 
     /* --- PINCH ZOOM: két ujj a kijelzőn --- */
@@ -532,7 +612,8 @@ static void ts_process_frame(nsfb_t *nsfb)
         g_down = 1;
         g_start_x = sx; g_start_y = sy;
         g_last_x = sx;  g_last_y = sy;
-        g_moved = 0; g_scrolling = 0; g_scroll_accum = 0;
+        g_moved = 0; g_scrolling = 0; g_scroll_accum = 0; g_scroll_accx = 0;
+        g_min_fired = 0;
     }
 
     /* mozgás lenyomott ujjal */
@@ -540,9 +621,24 @@ static void ts_process_frame(nsfb_t *nsfb)
         dx = sx - g_last_x;
         dy = sy - g_last_y;
         g_moved += (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+
+        /* FELSŐ ÉL LEHÚZÁSA -> minimalizálás. A képernyő tetejéről induló, túlnyomóan
+         * függőleges, lefelé irányuló húzás. A minimalizálás után (SIGCONT) tiszta
+         * lappal térünk vissza, ezért itt kilépünk a feldolgozásból. */
+        if (!g_min_fired && g_start_y <= TOP_EDGE_PX) {
+            int ddown = sy - g_start_y;
+            int dhoriz = sx - g_start_x; if (dhoriz < 0) dhoriz = -dhoriz;
+            if (ddown >= TOP_DRAG_TRIGGER && ddown > dhoriz) {
+                g_min_fired = 1;
+                minimize_self(nsfb);
+                frame_down = -1; have_x = have_y = 0;
+                return;
+            }
+        }
         if (!g_scrolling && g_moved > TAP_MAX_MOVE) {
             g_scrolling = 1;
             g_scroll_accum = 0;
+            g_scroll_accx = 0;
         }
         if (g_scrolling) {
             g_scroll_accum += dy;
@@ -555,6 +651,18 @@ static void ts_process_frame(nsfb_t *nsfb)
             while (g_scroll_accum >= SCROLL_STEP && nscroll < SCROLL_MAX_PER_FRAME) {
                 evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_MOUSE_4);
                 g_scroll_accum -= SCROLL_STEP; nscroll++;
+            }
+            /* VÍZSZINTES húzás (pl. rázoomolt oldalon): LEFT/RIGHT billentyűk */
+            g_scroll_accx += dx;
+            nsc2 = 0;
+            /* ujj jobbra (dx>0) -> tartalom jobbra gördül -> balra görgetés -> LEFT */
+            while (g_scroll_accx >= SCROLL_STEP && nsc2 < SCROLL_MAX_PER_FRAME) {
+                evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_LEFT);
+                g_scroll_accx -= SCROLL_STEP; nsc2++;
+            }
+            while (g_scroll_accx <= -SCROLL_STEP && nsc2 < SCROLL_MAX_PER_FRAME) {
+                evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_RIGHT);
+                g_scroll_accx += SCROLL_STEP; nsc2++;
             }
         }
         g_last_x = sx; g_last_y = sy;
@@ -584,6 +692,13 @@ static bool kindle_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
     int pr;
 
     if (!ts_inited) ts_setup(nsfb);
+
+    /* folytatás minimalizálás után: a KOReader átrajzolta a kijelzőt, ezért a
+     * böngésző teljes képét újra kiírjuk, mielőtt bármit feldolgoznánk */
+    if (g_resumed) {
+        g_resumed = 0;
+        full_reblit(nsfb);
+    }
 
     /* először a sorban álló eseményt adjuk vissza */
     if (evq_pop(event)) return true;
@@ -657,6 +772,7 @@ const nsfb_surface_rtns_t kindle_rtns = {
 };
 
 NSFB_SURFACE_DEF(kindle, NSFB_SURFACE_LINUX, &kindle_rtns)
+
 KFBEOF
     # a surface/Makefile-ban a mindig fordított kezelőkhöz hozzáadjuk
     sed -i 's/^SURFACE_HANDLER_yes := surface.c ram.c/SURFACE_HANDLER_yes := surface.c ram.c kindlefb.c/' \
