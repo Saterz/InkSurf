@@ -77,6 +77,8 @@ jobs:
           path: |
             out/netsurf
             out/fbink
+            out/mobitool
+            out/libmobi-build.log
             out/res/**
             out/libnsfb-src/**
           if-no-files-found: error
