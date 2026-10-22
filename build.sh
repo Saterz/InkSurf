@@ -311,7 +311,7 @@ volatile sig_atomic_t g_field_input_request = 0;   /* mező fókuszba került ->
 volatile sig_atomic_t g_inject_request = 0;        /* folytatás után a beírt szöveget injektálni kell a mezőbe */
 
 /* gomb-azonosítók */
-enum { TB_NONE=0, TB_BACK, TB_FWD, TB_RELOAD, TB_MIN, TB_CLOSE, TB_URL };
+enum { TB_NONE=0, TB_BACK, TB_FWD, TB_RELOAD, TB_READER, TB_MIN, TB_CLOSE, TB_URL };
 
 /* ---- érintés (evdev) ---- */
 #ifndef ABS_MT_POSITION_X
@@ -567,6 +567,13 @@ static void kfb_reload(int cx, int cy, int r, uint8_t v)     /* ⟳ gyűrű rés
     kfb_line(cx + r - 1, cy - 1, cx + r - 9, cy - 4, v, 2);
     kfb_line(cx + r - 1, cy - 1, cx + r - 3, cy + 8, v, 2);
 }
+static void kfb_reader(int cx, int cy, uint8_t v)   /* olvasó: lap + szövegsorok */
+{
+    int w = 22, h = 28, x = cx - w/2, y = cy - h/2, i;
+    kfb_fill(x, y, w, 2, v); kfb_fill(x, y + h - 2, w, 2, v);
+    kfb_fill(x, y, 2, h, v); kfb_fill(x + w - 2, y, 2, h, v);
+    for (i = 0; i < 3; i++) kfb_fill(x + 5, y + 8 + i * 7, w - 10, 2, v);
+}
 static void kfb_btnbox(int cx, int cy, int bw)
 {
     int x = cx - bw/2, y = cy - bw/2;
@@ -593,10 +600,13 @@ static int toolbar_hit(int px)
 {
     int bw = 56, pad = 14, gap = 10;
     int xback = pad, xfwd = pad + (bw + gap), xrel = pad + 2*(bw + gap);
-    int xclose = kfb_scrw - pad - bw, xmin = kfb_scrw - pad - (bw + gap) - bw;
+    int xclose = kfb_scrw - pad - bw;
+    int xmin = kfb_scrw - pad - (bw + gap) - bw;
+    int xread = kfb_scrw - pad - 2*(bw + gap) - bw;
     if (px >= xback && px < xback + bw) return TB_BACK;
     if (px >= xfwd  && px < xfwd  + bw) return TB_FWD;
     if (px >= xrel  && px < xrel  + bw) return TB_RELOAD;
+    if (px >= xread && px < xread + bw) return TB_READER;
     if (px >= xmin  && px < xmin  + bw) return TB_MIN;
     if (px >= xclose&& px < xclose+ bw) return TB_CLOSE;
     return TB_URL;
@@ -605,17 +615,20 @@ static void draw_toolbar(nsfb_t *nsfb, int do_update)
 {
     int bw = 56, pad = 14, gap = 10, cy = KFB_TBAR_H / 2;
     int xback = pad + bw/2, xfwd = pad + (bw+gap) + bw/2, xrel = pad + 2*(bw+gap) + bw/2;
-    int xclose = kfb_scrw - pad - bw/2, xmin = kfb_scrw - pad - (bw+gap) - bw/2;
-    int urlx0 = xrel + bw/2 + 18, urlx1 = xmin - bw/2 - 18;
+    int xclose = kfb_scrw - pad - bw/2;
+    int xmin = kfb_scrw - pad - (bw+gap) - bw/2;
+    int xread = kfb_scrw - pad - 2*(bw+gap) - bw/2;
+    int urlx0 = xrel + bw/2 + 18, urlx1 = xread - bw/2 - 18;
     UNUSED(nsfb);
     if (kfb_mem == NULL) return;
     kfb_fill(0, 0, kfb_scrw, KFB_TBAR_H, 0xFF);            /* fehér háttér */
     kfb_fill(0, KFB_TBAR_H - 2, kfb_scrw, 2, 0x40);        /* alsó szegély */
     kfb_btnbox(xback, cy, bw); kfb_btnbox(xfwd, cy, bw); kfb_btnbox(xrel, cy, bw);
-    kfb_btnbox(xmin, cy, bw);  kfb_btnbox(xclose, cy, bw);
+    kfb_btnbox(xread, cy, bw);  kfb_btnbox(xmin, cy, bw);  kfb_btnbox(xclose, cy, bw);
     kfb_tri_left(xback, cy, 13, 0x00);
     kfb_tri_right(xfwd, cy, 13, 0x00);
     kfb_reload(xrel, cy, 14, 0x00);
+    kfb_reader(xread, cy, 0x00);                           /* olvasó nézet */
     kfb_fill(xmin - 14, cy + 9, 28, 5, 0x00);              /* '_' minimalizál */
     kfb_line(xclose - 13, cy - 13, xclose + 13, cy + 13, 0x00, 3);  /* ✕ bezár */
     kfb_line(xclose + 13, cy - 13, xclose - 13, cy + 13, 0x00, 3);
@@ -650,7 +663,7 @@ static void minimize_self(nsfb_t *nsfb, int reason)
     const char *sig = getenv("NETSURF_SIGNAL_FILE");
     if (sig != NULL && sig[0] != 0) {
         FILE *f = fopen(sig, "w");
-        if (f != NULL) { fputs(reason == 1 ? "menu" : reason == 2 ? "url" : reason == 3 ? "field" : "min", f); fputc('\n', f); fclose(f); }
+        if (f != NULL) { fputs(reason == 1 ? "menu" : reason == 2 ? "url" : reason == 3 ? "field" : reason == 5 ? "reader" : "min", f); fputc('\n', f); fclose(f); }
     }
     if (ts_fd >= 0) ioctl(ts_fd, EVIOCGRAB, (void *)0);   /* grab elengedése */
     g_down = 0; g_scrolling = 0; pinch_on = 0;
@@ -886,6 +899,7 @@ static void ts_process_frame(nsfb_t *nsfb)
                     case TB_BACK:   g_nav_request = 1; break;
                     case TB_FWD:    g_nav_request = 2; break;
                     case TB_RELOAD: g_nav_request = 3; break;
+                    case TB_READER: minimize_self(nsfb, 5); break;
                     case TB_MIN:    minimize_self(nsfb, 0); break;
                     case TB_CLOSE:  g_nav_request = 4; break;
                     case TB_URL:    minimize_self(nsfb, 2); break;
