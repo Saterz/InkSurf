@@ -949,11 +949,8 @@ static bool kindle_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
         draw_toolbar(nsfb, 1);
     }
 
-    /* oldalon belüli mező fókuszba került -> KOReader billentyűzet */
-    if (g_field_input_request) {
-        g_field_input_request = 0;
-        minimize_self(nsfb, 3);
-    }
+    /* (az oldalon belüli mezőket helyben, a NetSurf saját OSK-jával szerkesztjük,
+     *  ezért itt NEM lépünk ki a böngészőből) */
 
     /* először a sorban álló eseményt adjuk vissza */
     if (evq_pop(event)) return true;
@@ -1302,6 +1299,22 @@ osk_click(fbtk_widget_t *widget, fbtk_callback_info *cbi)
 \treturn 0;
 }'''
 new = '''static int osk_caps = 0;
+static fbtk_widget_t *osk_keys[KEYCOUNT] = {0};
+/* vizualis visszajelzes: a betuk nagy/kisbeture valtanak a caps lock allapot szerint */
+static void osk_update_caps(void)
+{
+\tint i;
+\tfor (i = 0; i < KEYCOUNT; i++) {
+\t\tconst char *t = kbdbase[i].t;
+\t\tif (osk_keys[i] != NULL && t != NULL &&
+\t\t    t[0] >= 'a' && t[0] <= 'z' && t[1] == 0) {
+\t\t\tchar buf[2];
+\t\t\tbuf[0] = (char)(osk_caps ? (t[0] - 32) : t[0]);
+\t\t\tbuf[1] = 0;
+\t\t\tfbtk_set_text(osk_keys[i], buf);
+\t\t}
+\t}
+}
 static int
 osk_click(fbtk_widget_t *widget, fbtk_callback_info *cbi)
 {
@@ -1316,6 +1329,7 @@ osk_click(fbtk_widget_t *widget, fbtk_callback_info *cbi)
 \t\t\tevent.type = osk_caps ? NSFB_EVENT_KEY_DOWN : NSFB_EVENT_KEY_UP;
 \t\t\tevent.value.keycode = NSFB_KEY_LSHIFT;
 \t\t\tfbtk_input(widget, &event);
+\t\t\tosk_update_caps();
 \t\t}
 \t\treturn 0;
 \t}
@@ -1328,12 +1342,19 @@ osk_click(fbtk_widget_t *widget, fbtk_callback_info *cbi)
 }'''
 if old in s:
     s = s.replace(old, new)
+    # a letrehozo ciklusban eltaroljuk a billentyu-widgeteket (a feliratvaltashoz)
+    loop_old = "\t\tfbtk_set_text(widget, kbdbase[kloop].t);\n\t}"
+    loop_new = "\t\tfbtk_set_text(widget, kbdbase[kloop].t);\n\t\tif (kloop < KEYCOUNT) osk_keys[kloop] = widget;\n\t}"
+    if loop_old in s:
+        s = s.replace(loop_old, loop_new, 1)
+    else:
+        sys.stderr.write("FIGYELEM: OSK letrehozo ciklus horgony nem talalhato (caps-visszajelzes kimaradt)\\n")
     open(p, "w").write(s)
-    sys.stderr.write("OSK shift-toggle beszurva\\n")
+    sys.stderr.write("OSK shift-toggle + caps-visszajelzes beszurva\\n")
 else:
     sys.stderr.write("FIGYELEM: osk_click horgony nem talalhato (shift patch kimaradt)\\n")
 PYSHIFT
-grep -q "osk_caps" "$SRC/netsurf/frontends/framebuffer/fbtk/osk.c" && echo "   shift (caps lock) patch OK" || echo "   (shift patch kimaradt)"
+grep -q "osk_update_caps" "$SRC/netsurf/frontends/framebuffer/fbtk/osk.c" && echo "   shift + caps-visszajelzés patch OK" || echo "   (shift patch kimaradt)"
 
 # 2n) A képernyő-billentyűzet hibás gombjai: a "/" és "\" keycode fel van cserélve (csak e két
 #     gombon fordul elő), az aposztróf pedig "l"-t ad. Felcseréljük / javítjuk.
@@ -1341,6 +1362,54 @@ OSKC="$SRC/netsurf/frontends/framebuffer/fbtk/osk.c"
 sed -i 's/NSFB_KEY_SLASH/__NSFBTMP__/g; s/NSFB_KEY_BACKSLASH/NSFB_KEY_SLASH/g; s/__NSFBTMP__/NSFB_KEY_BACKSLASH/g' "$OSKC"
 sed -i "s/\"'\", NSFB_KEY_l/\"'\", NSFB_KEY_QUOTE/" "$OSKC"
 echo "   OSK billentyű-javítások (perjel/aposztróf):"; grep -nE 'NSFB_KEY_QUOTE|"/", NSFB_KEY_SLASH' "$OSKC" | head
+
+# 2n2) MAGYAR ÉKEZETEK a képernyő-billentyűzeten. A billentyűkód normál esetben a
+#      keymap-táblán megy át; mi bevezetünk egy "közvetlen Unicode" tartományt: a
+#      0x2000-nál nagyobb kód egyszerűen (kód - 0x2000) Unicode-karaktert ad. Így az
+#      OSK-ba felvehetünk ékezetes billentyűket tetszőleges Unicode-dal.
+python3 - "$SRC/netsurf/frontends/framebuffer/fbtk/event.c" <<'PYACC'
+import sys
+p = sys.argv[1]; s = open(p).read()
+anc = "fbtk_keycode_to_ucs4(int code, fbtk_modifier_type mods)\n{\n\tint ucs4 = -1;\n"
+if anc not in s:
+    sys.stderr.write("EKEZET-PATCH HIBA: fbtk_keycode_to_ucs4 horgony nem talalhato\n"); sys.exit(2)
+s = s.replace(anc, anc + "\n\t/* kozvetlen Unicode tartomany a sajat OSK-billentyukhoz (pl. magyar ekezetek) */\n\tif (code >= 0x2000) return code - 0x2000;\n", 1)
+open(p, "w").write(s)
+sys.stderr.write("event.c: kozvetlen-Unicode billentyukod beszurva\n")
+PYACC
+grep -q "code >= 0x2000" "$SRC/netsurf/frontends/framebuffer/fbtk/event.c" \
+  && echo "   ékezet (event.c) patch OK" || { echo "HIBA: ékezet event.c patch nem sikerült"; exit 1; }
+
+python3 - "$SRC/netsurf/frontends/framebuffer/fbtk/osk.c" <<'PYACC2'
+import sys
+p = sys.argv[1]; s = open(p).read()
+# KEYCOUNT 58 -> 67 (9 ekezetes maganhangzo)
+if "#define KEYCOUNT 58" not in s:
+    sys.stderr.write("EKEZET-PATCH HIBA: KEYCOUNT 58 nem talalhato\n"); sys.exit(2)
+s = s.replace("#define KEYCOUNT 58", "#define KEYCOUNT 67", 1)
+# ekezetes billentyusor beszurasa a kbdbase vege (a lefele nyil utan, a '};' ele)
+anchor = '\t{ 250,  75,  20,  15, "\\xe2\\x96\\xbc", NSFB_KEY_DOWN},\n};'
+if anchor not in s:
+    sys.stderr.write("EKEZET-PATCH HIBA: kbdbase veg horgony nem talalhato\n"); sys.exit(2)
+rows = (
+    '\t{ 250,  75,  20,  15, "\\xe2\\x96\\xbc", NSFB_KEY_DOWN},\n'
+    '\t{  60,  90,  20,  15, "\\xc3\\xa1", (enum nsfb_key_code_e)(0x2000 + 0x00E1)},\n'  # á
+    '\t{  80,  90,  20,  15, "\\xc3\\xa9", (enum nsfb_key_code_e)(0x2000 + 0x00E9)},\n'  # é
+    '\t{ 100,  90,  20,  15, "\\xc3\\xad", (enum nsfb_key_code_e)(0x2000 + 0x00ED)},\n'  # í
+    '\t{ 120,  90,  20,  15, "\\xc3\\xb3", (enum nsfb_key_code_e)(0x2000 + 0x00F3)},\n'  # ó
+    '\t{ 140,  90,  20,  15, "\\xc3\\xb6", (enum nsfb_key_code_e)(0x2000 + 0x00F6)},\n'  # ö
+    '\t{ 160,  90,  20,  15, "\\xc5\\x91", (enum nsfb_key_code_e)(0x2000 + 0x0151)},\n'  # ő
+    '\t{ 180,  90,  20,  15, "\\xc3\\xba", (enum nsfb_key_code_e)(0x2000 + 0x00FA)},\n'  # ú
+    '\t{ 200,  90,  20,  15, "\\xc3\\xbc", (enum nsfb_key_code_e)(0x2000 + 0x00FC)},\n'  # ü
+    '\t{ 220,  90,  20,  15, "\\xc5\\xb1", (enum nsfb_key_code_e)(0x2000 + 0x0171)},\n'  # ű
+    '};'
+)
+s = s.replace(anchor, rows, 1)
+open(p, "w").write(s)
+sys.stderr.write("osk.c: 9 magyar ekezetes billentyu hozzaadva\n")
+PYACC2
+grep -q "0x2000 + 0x0151" "$SRC/netsurf/frontends/framebuffer/fbtk/osk.c" \
+  && echo "   ékezetes billentyűk (osk.c) patch OK" || { echo "HIBA: ékezet osk.c patch nem sikerült"; exit 1; }
 
 # 2o) Oldali (HTML) mezőre koppintva is jöjjön fel a billentyűzet (map_osk a caret-elhelyezéskor;
 #     a map_osk() az fbtk.h-ban deklarálva van, amit a gui.c már include-ol)
@@ -1354,15 +1423,15 @@ anc = ("\tfb_queue_redraw(g->browser,\n"
        "\t\t\tx + 1 - bwidget->scrollx,\n"
        "\t\t\ty + height - bwidget->scrolly);\n"
        "}")
-new = anc[:-1] + ("\n\tif (g_field_click_pending > 0) { g_field_input_request = 1; g_field_click_pending = 0; }\n}")
+new = anc[:-1] + "\n\tmap_osk();\n}"
 if anc in s:
     s = s.replace(anc, new, 1)
     open(p, "w").write(s)
-    sys.stderr.write("place_caret -> KOReader billentyuzet kivalto beszurva\n")
+    sys.stderr.write("place_caret -> map_osk (helyben felugro OSK) beszurva\n")
 else:
     sys.stderr.write("FIGYELEM: place_caret horgony nem talalhato\n")
 PYCARET
-grep -q "g_field_input_request = 1" "$SRC/netsurf/frontends/framebuffer/gui.c" && echo "   mezo-fokusz (KOReader) patch OK" || { echo "HIBA: mezo-fokusz patch nem sikerult"; exit 1; }
+grep -q "map_osk();" "$SRC/netsurf/frontends/framebuffer/gui.c" && echo "   mezo-fokusz (OSK) patch OK" || { echo "HIBA: mezo-fokusz patch nem sikerult"; exit 1; }
 
 # 2l) LETÖLTÉS-KEZELŐ a framebuffer frontendhez (hiányzik belőle): fájlba menti a
 #     letöltött fájlt a NETSURF_DOWNLOAD_DIR mappába, és a NETSURF_DL_LIST listába írja.
