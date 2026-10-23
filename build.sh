@@ -983,6 +983,24 @@ static bool kindle_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
         minimize_self(nsfb, 3);
     }
 
+    /* PERIODIKUS FELSŐSÁV-VISSZARAJZOLÁS: a Kindle rendszeróra (bal fent) / akku (jobb
+     * fent) időnként ránk rajzol; MTK-n lipc-ből nem állítható le megbízhatóan. Ezért
+     * tétlen állapotban ~2,5 mp-enként visszaírjuk a saját eszköztár-sávunkat (könnyű,
+     * részleges frissítés), így az óra pár mp-en belül eltűnik. Aktív érintés közben
+     * (amikor a poll eseményt ad) ez nem fut le, így görgetéskor nincs villogás. */
+    {
+        static struct timespec s_last_tbar = { 0, 0 };
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (s_last_tbar.tv_sec == 0) {
+            s_last_tbar = now;
+        } else {
+            long ms = (now.tv_sec - s_last_tbar.tv_sec) * 1000L
+                    + (now.tv_nsec - s_last_tbar.tv_nsec) / 1000000L;
+            if (ms >= 2500) { draw_toolbar(nsfb, 1); s_last_tbar = now; }
+        }
+    }
+
     /* először a sorban álló eseményt adjuk vissza */
     if (evq_pop(event)) return true;
 
@@ -999,7 +1017,10 @@ static bool kindle_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
 
     pfd.fd = ts_fd;
     pfd.events = POLLIN;
-    pr = poll(&pfd, 1, timeout < 0 ? -1 : timeout);
+    /* az időkorlátot felülről bekorlátozzuk, hogy tétlenkor is ébredjünk a felső
+     * sáv periodikus visszarajzolásához (lásd fent) */
+    if (timeout < 0 || timeout > 1500) timeout = 1500;
+    pr = poll(&pfd, 1, timeout);
     if (pr <= 0) return false;      /* időtúllépés vagy hiba */
 
     /* az összes elérhető evdev-rekord beolvasása és feldolgozása */
@@ -1454,15 +1475,31 @@ anc = ("\tfb_queue_redraw(g->browser,\n"
        "\t\t\tx + 1 - bwidget->scrollx,\n"
        "\t\t\ty + height - bwidget->scrolly);\n"
        "}")
-new = anc[:-1] + ("\n\tif (g_field_click_pending > 0) { g_field_input_request = 1; g_field_click_pending = 0; nsk_flog(\"MEZO place_caret: felhasznaloi koppintas -> g_field_input_request=1\"); }\n}")
+new = anc[:-1] + ("\n\tif (g_field_click_pending > 0) { g_field_copy_request = 1; g_field_click_pending = 0; nsk_flog(\"MEZO place_caret: felhasznaloi koppintas -> g_field_copy_request=1\"); }\n}")
 if anc in s:
     s = s.replace(anc, new, 1)
     open(p, "w").write(s)
     sys.stderr.write("place_caret -> mezo-kivalto (KOReader overlay) beszurva\n")
 else:
-    sys.stderr.write("FIGYELEM: place_caret horgony nem talalhato\n")
+    sys.stderr.write("FIGYELEM: place_caret horgono nem talalhato\n")
 PYCARET
-grep -q "g_field_input_request = 1" "$SRC/netsurf/frontends/framebuffer/gui.c" && echo "   mezo-fokusz (KOReader overlay) patch OK" || { echo "HIBA: mezo-fokusz patch nem sikerult"; exit 1; }
+grep -q "g_field_copy_request = 1" "$SRC/netsurf/frontends/framebuffer/gui.c" && echo "   mezo-fokusz (KOReader overlay) patch OK" || { echo "HIBA: mezo-fokusz patch nem sikerult"; exit 1; }
+
+# 2k2) clipboard.c: a static vágólap-puffer kiexportálása, hogy a gui.c kiolvashassa a
+#      fókuszált mező aktuális tartalmát (SELECT_ALL + COPY után).
+python3 - "$SRC/netsurf/frontends/framebuffer/clipboard.c" <<'PYCLIP'
+import sys
+p = sys.argv[1]; s = open(p).read()
+anc = "struct gui_clipboard_table *framebuffer_clipboard_table = &clipboard_table;"
+if anc not in s:
+    sys.stderr.write("CLIP-PATCH HIBA: horgony nem talalhato\n"); sys.exit(2)
+add = anc + ("\n\n/* Kindle: a vágólap aktuális szövegének kiolvasása a gui.c-ből (mező-tartalom átvétel) */\n"
+             "const char *fb_clipboard_text(void) { return gui_clipboard.buffer ? gui_clipboard.buffer : \"\"; }\n")
+s = s.replace(anc, add, 1)
+open(p, "w").write(s)
+sys.stderr.write("clipboard.c: fb_clipboard_text() exportalva\n")
+PYCLIP
+grep -q "fb_clipboard_text" "$SRC/netsurf/frontends/framebuffer/clipboard.c" && echo "   clipboard export OK" || { echo "HIBA: clipboard export nem sikerult"; exit 1; }
 
 # 2l) LETÖLTÉS-KEZELŐ a framebuffer frontendhez (hiányzik belőle): fájlba menti a
 #     letöltött fájlt a NETSURF_DOWNLOAD_DIR mappába, és a NETSURF_DL_LIST listába írja.
@@ -1578,6 +1615,8 @@ add1 = a1 + ('#include <signal.h>\n'
              'extern volatile sig_atomic_t g_field_click_pending;\n'
              'extern volatile sig_atomic_t g_field_input_request;\n'
              'extern volatile sig_atomic_t g_inject_request;\n'
+             'static volatile sig_atomic_t g_field_copy_request = 0;\n'
+             'extern const char *fb_clipboard_text(void);\n'
              'static void nsk_flog(const char *fmt, ...) {\n'
              '\tconst char *fl = getenv("NETSURF_FIELD_LOG");\n'
              '\tif (fl == NULL || fl[0] == 0) return;\n'
@@ -1600,6 +1639,22 @@ h2 = ("\t\tif (g_nav_request != 0) {\n"
       "\t\t\t}\n"
       "\t\t}\n"
       "\t\tif (g_field_click_pending > 0) g_field_click_pending--;\n"
+      "\t\tif (g_field_copy_request != 0) {\n"
+      "\t\t\tg_field_copy_request = 0;\n"
+      "\t\t\tif (window_list != NULL && window_list->bw != NULL) {\n"
+      "\t\t\t\tbrowser_window_key_press(window_list->bw, 1); /* NS_KEY_SELECT_ALL */\n"
+      "\t\t\t\tbrowser_window_key_press(window_list->bw, 3); /* NS_KEY_COPY_SELECTION */\n"
+      "\t\t\t\t{ const char *_ct = fb_clipboard_text();\n"
+      "\t\t\t\t  const char *_ftf = getenv(\"NETSURF_FIELD_TEXT\");\n"
+      "\t\t\t\t  if (_ftf != NULL && _ftf[0] != 0) {\n"
+      "\t\t\t\t    FILE *_tf = fopen(_ftf, \"wb\");\n"
+      "\t\t\t\t    if (_tf != NULL) { if (_ct != NULL && _ct[0] != 0) fputs(_ct, _tf); fclose(_tf); }\n"
+      "\t\t\t\t  }\n"
+      "\t\t\t\t  nsk_flog(\"GUI MEZO-SZOVEG kiolvasva: %u bajt\", (unsigned)(_ct ? strlen(_ct) : 0)); }\n"
+      "\t\t\t\tbrowser_window_key_press(window_list->bw, 26); /* NS_KEY_CLEAR_SELECTION */\n"
+      "\t\t\t}\n"
+      "\t\t\tg_field_input_request = 1;\n"
+      "\t\t}\n"
       "\t\tif (g_inject_request != 0) {\n"
       "\t\t\tg_inject_request = 0;\n"
       "\t\t\tnsk_flog(\"GUI INJEKT: g_inject_request feldolgozas; window_list=%p bw=%p\", (void*)window_list, (void*)(window_list?window_list->bw:NULL));\n"
@@ -1611,6 +1666,7 @@ h2 = ("\t\tif (g_nav_request != 0) {\n"
       "\t\t\t\t\tnsk_flog(\"GUI INJEKT: fajl megnyitva=%d\", _f ? 1 : 0);\n"
       "\t\t\t\t\tif (_f != NULL) {\n"
       "\t\t\t\t\t\tint _ch; uint32_t _cp = 0; int _need = 0; int _np = 0;\n"
+      "\t\t\t\t\t\tbrowser_window_key_press(window_list->bw, 1); /* NS_KEY_SELECT_ALL: a meglevo tartalmat az elso karakter lecsereli */\n"
       "\t\t\t\t\t\twhile ((_ch = fgetc(_f)) != EOF) {\n"
       "\t\t\t\t\t\t\tunsigned char _b = (unsigned char)_ch;\n"
       "\t\t\t\t\t\t\tif (_need == 0) {\n"
@@ -1625,6 +1681,7 @@ h2 = ("\t\tif (g_nav_request != 0) {\n"
       "\t\t\t\t\t\t\t\telse { _need = 0; }\n"
       "\t\t\t\t\t\t\t}\n"
       "\t\t\t\t\t\t}\n"
+      "\t\t\t\t\t\tif (_np == 0) browser_window_key_press(window_list->bw, 8); /* ures uj szoveg: NS_KEY_DELETE_LEFT torli a kijelolest */\n"
       "\t\t\t\t\t\tfclose(_f); remove(_if);\n"
       "\t\t\t\t\t\tnsk_flog(\"GUI INJEKT: kesz, %d billentyu kuldve\", _np);\n"
       "\t\t\t\t\t}\n"
