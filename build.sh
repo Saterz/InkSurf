@@ -145,6 +145,22 @@ static void ktlog(const char *fmt, ...)
     fputc('\n', stderr);
     fflush(stderr);
     va_end(ap);
+    /* Perzisztens, hozzáfűző diagnosztikai napló: NEM íródik felül újraindításkor,
+     * így a mezőteszt nyoma akkor is megmarad, ha közben a böngésző újraindul. */
+    {
+        const char *fl = getenv("NETSURF_FIELD_LOG");
+        if (fl != NULL && fl[0] != 0) {
+            FILE *lf = fopen(fl, "a");
+            if (lf != NULL) {
+                va_list ap2;
+                va_start(ap2, fmt);
+                vfprintf(lf, fmt, ap2);
+                va_end(ap2);
+                fputc('\n', lf);
+                fclose(lf);
+            }
+        }
+    }
 }
 
 static int      kfb_fd = -1;
@@ -684,38 +700,11 @@ static void minimize_self(nsfb_t *nsfb, int reason)
      * eseményként küldjük be (ugyanaz az útvonal, mint a billentyűzeté). Az
      * ékezet-patch "közvetlen Unicode" tartományát használjuk: 0x2000+kódpont. */
     if (reason == 3) {
-        const char *inj = getenv("NETSURF_INJECT_FILE");
-        ktlog("INJEKT: NETSURF_INJECT_FILE=%s", inj ? inj : "(nincs)");
-        if (inj != NULL && inj[0] != 0) {
-            FILE *f = fopen(inj, "rb");
-            ktlog("INJEKT: fajl megnyitva=%d", f ? 1 : 0);
-            if (f != NULL) {
-                int c; unsigned int cp = 0; int need = 0, pushed = 0;
-                while ((c = fgetc(f)) != EOF) {
-                    unsigned char b = (unsigned char)c;
-                    unsigned int out = 0; int have = 0;
-                    if (need == 0) {
-                        if (b == '\n' || b == '\r') continue;
-                        if (b < 0x80) { out = b; have = 1; }
-                        else if ((b & 0xE0) == 0xC0) { cp = b & 0x1F; need = 1; }
-                        else if ((b & 0xF0) == 0xE0) { cp = b & 0x0F; need = 2; }
-                        else if ((b & 0xF8) == 0xF0) { cp = b & 0x07; need = 3; }
-                        else { need = 0; }
-                    } else {
-                        if ((b & 0xC0) == 0x80) { cp = (cp << 6) | (b & 0x3F); need--; if (need == 0) { out = cp; have = 1; } }
-                        else { need = 0; }
-                    }
-                    if (have && out >= 32) {
-                        evq_push_key(NSFB_EVENT_KEY_DOWN, (enum nsfb_key_code_e)(0x2000 + out));
-                        ktlog("INJEKT push: cp=%u -> keycode=%u", out, 0x2000 + out);
-                        pushed++;
-                    }
-                }
-                fclose(f);
-                remove(inj);
-                ktlog("INJEKT: osszesen %d billentyu betolve a sorba", pushed);
-            }
-        }
+        /* A tényleges beírást a gui.c fő ciklusa végzi: közvetlenül
+         * browser_window_key_press(bw, kódpont) hívással (nem szintetikus
+         * billentyű-eseménnyel). Csak jelezzük neki. */
+        g_inject_request = 1;
+        ktlog("INJEKT: g_inject_request=1 beallitva (gui.c vegzi a beirast)");
     }
     ktlog("folytatas: SIGCONT");
 }
@@ -953,6 +942,7 @@ static void ts_process_frame(nsfb_t *nsfb)
             /* ha a koppintás beviteli mezőbe talál, a place_caret ebből tudja,
              * hogy ez user-koppintás -> KOReader billentyűzet (nem automatikus fókusz) */
             g_field_click_pending = 4;
+            ktlog("MEZO: tartalom-koppintas (%d,%d) -> g_field_click_pending=4", cx, cy);
             evq_push_move(cx, cy);
             evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_MOUSE_1);
             evq_push_key(NSFB_EVENT_KEY_UP, NSFB_KEY_MOUSE_1);
@@ -1464,7 +1454,7 @@ anc = ("\tfb_queue_redraw(g->browser,\n"
        "\t\t\tx + 1 - bwidget->scrollx,\n"
        "\t\t\ty + height - bwidget->scrolly);\n"
        "}")
-new = anc[:-1] + ("\n\tif (g_field_click_pending > 0) { g_field_input_request = 1; g_field_click_pending = 0; }\n}")
+new = anc[:-1] + ("\n\tif (g_field_click_pending > 0) { g_field_input_request = 1; g_field_click_pending = 0; nsk_flog(\"MEZO place_caret: felhasznaloi koppintas -> g_field_input_request=1\"); }\n}")
 if anc in s:
     s = s.replace(anc, new, 1)
     open(p, "w").write(s)
@@ -1581,12 +1571,20 @@ a1 = "static bool fb_complete = false;\n"
 if a1 not in s:
     sys.stderr.write("TB-PATCH HIBA: fb_complete horgony nem talalhato\n"); sys.exit(2)
 add1 = a1 + ('#include <signal.h>\n'
+             '#include <stdarg.h>\n'
              'extern char g_toolbar_url[1024];\n'
              'extern volatile sig_atomic_t g_toolbar_url_dirty;\n'
              'extern volatile sig_atomic_t g_nav_request;\n'
              'extern volatile sig_atomic_t g_field_click_pending;\n'
              'extern volatile sig_atomic_t g_field_input_request;\n'
-             'extern volatile sig_atomic_t g_inject_request;\n')
+             'extern volatile sig_atomic_t g_inject_request;\n'
+             'static void nsk_flog(const char *fmt, ...) {\n'
+             '\tconst char *fl = getenv("NETSURF_FIELD_LOG");\n'
+             '\tif (fl == NULL || fl[0] == 0) return;\n'
+             '\tFILE *lf = fopen(fl, "a"); if (lf == NULL) return;\n'
+             '\tva_list ap; va_start(ap, fmt); vfprintf(lf, fmt, ap); va_end(ap);\n'
+             '\tfputc(\'\\n\', lf); fclose(lf);\n'
+             '}\n')
 s = s.replace(a1, add1, 1)
 
 a2 = "\twhile (fb_complete != true) {\n"
@@ -1604,27 +1602,31 @@ h2 = ("\t\tif (g_nav_request != 0) {\n"
       "\t\tif (g_field_click_pending > 0) g_field_click_pending--;\n"
       "\t\tif (g_inject_request != 0) {\n"
       "\t\t\tg_inject_request = 0;\n"
+      "\t\t\tnsk_flog(\"GUI INJEKT: g_inject_request feldolgozas; window_list=%p bw=%p\", (void*)window_list, (void*)(window_list?window_list->bw:NULL));\n"
       "\t\t\tif (window_list != NULL && window_list->bw != NULL) {\n"
       "\t\t\t\tconst char *_if = getenv(\"NETSURF_INJECT_FILE\");\n"
+      "\t\t\t\tnsk_flog(\"GUI INJEKT: inject-fajl=%s\", _if ? _if : \"(nincs)\");\n"
       "\t\t\t\tif (_if != NULL && _if[0] != 0) {\n"
       "\t\t\t\t\tFILE *_f = fopen(_if, \"rb\");\n"
+      "\t\t\t\t\tnsk_flog(\"GUI INJEKT: fajl megnyitva=%d\", _f ? 1 : 0);\n"
       "\t\t\t\t\tif (_f != NULL) {\n"
-      "\t\t\t\t\t\tint _ch; uint32_t _cp = 0; int _need = 0;\n"
+      "\t\t\t\t\t\tint _ch; uint32_t _cp = 0; int _need = 0; int _np = 0;\n"
       "\t\t\t\t\t\twhile ((_ch = fgetc(_f)) != EOF) {\n"
       "\t\t\t\t\t\t\tunsigned char _b = (unsigned char)_ch;\n"
       "\t\t\t\t\t\t\tif (_need == 0) {\n"
       "\t\t\t\t\t\t\t\tif (_b == '\\n' || _b == '\\r') continue;\n"
-      "\t\t\t\t\t\t\t\tif (_b < 0x80) { browser_window_key_press(window_list->bw, _b); }\n"
+      "\t\t\t\t\t\t\t\tif (_b < 0x80) { bool _r = browser_window_key_press(window_list->bw, _b); nsk_flog(\"GUI INJEKT key cp=%u -> key_press=%d\", (unsigned)_b, (int)_r); _np++; }\n"
       "\t\t\t\t\t\t\t\telse if ((_b & 0xE0) == 0xC0) { _cp = _b & 0x1F; _need = 1; }\n"
       "\t\t\t\t\t\t\t\telse if ((_b & 0xF0) == 0xE0) { _cp = _b & 0x0F; _need = 2; }\n"
       "\t\t\t\t\t\t\t\telse if ((_b & 0xF8) == 0xF0) { _cp = _b & 0x07; _need = 3; }\n"
       "\t\t\t\t\t\t\t\telse { _need = 0; }\n"
       "\t\t\t\t\t\t\t} else {\n"
-      "\t\t\t\t\t\t\t\tif ((_b & 0xC0) == 0x80) { _cp = (_cp << 6) | (_b & 0x3F); _need--; if (_need == 0) browser_window_key_press(window_list->bw, _cp); }\n"
+      "\t\t\t\t\t\t\t\tif ((_b & 0xC0) == 0x80) { _cp = (_cp << 6) | (_b & 0x3F); _need--; if (_need == 0) { bool _r = browser_window_key_press(window_list->bw, _cp); nsk_flog(\"GUI INJEKT key cp=%u -> key_press=%d\", (unsigned)_cp, (int)_r); _np++; } }\n"
       "\t\t\t\t\t\t\t\telse { _need = 0; }\n"
       "\t\t\t\t\t\t\t}\n"
       "\t\t\t\t\t\t}\n"
       "\t\t\t\t\t\tfclose(_f); remove(_if);\n"
+      "\t\t\t\t\t\tnsk_flog(\"GUI INJEKT: kesz, %d billentyu kuldve\", _np);\n"
       "\t\t\t\t\t}\n"
       "\t\t\t\t}\n"
       "\t\t\t}\n"
