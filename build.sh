@@ -1494,7 +1494,8 @@ anc = "struct gui_clipboard_table *framebuffer_clipboard_table = &clipboard_tabl
 if anc not in s:
     sys.stderr.write("CLIP-PATCH HIBA: horgony nem talalhato\n"); sys.exit(2)
 add = anc + ("\n\n/* Kindle: a vágólap aktuális szövegének kiolvasása a gui.c-ből (mező-tartalom átvétel) */\n"
-             "const char *fb_clipboard_text(void) { return gui_clipboard.buffer ? gui_clipboard.buffer : \"\"; }\n")
+             "const char *fb_clipboard_text(void) { return gui_clipboard.buffer ? gui_clipboard.buffer : \"\"; }\n"
+             "void fb_clipboard_clear(void) { gui_clipboard.length = 0; if (gui_clipboard.buffer) gui_clipboard.buffer[0] = '\\0'; }\n")
 s = s.replace(anc, add, 1)
 open(p, "w").write(s)
 sys.stderr.write("clipboard.c: fb_clipboard_text() exportalva\n")
@@ -1617,6 +1618,7 @@ add1 = a1 + ('#include <signal.h>\n'
              'extern volatile sig_atomic_t g_inject_request;\n'
              'static volatile sig_atomic_t g_field_copy_request = 0;\n'
              'extern const char *fb_clipboard_text(void);\n'
+             'extern void fb_clipboard_clear(void);\n'
              'static void nsk_flog(const char *fmt, ...) {\n'
              '\tconst char *fl = getenv("NETSURF_FIELD_LOG");\n'
              '\tif (fl == NULL || fl[0] == 0) return;\n'
@@ -1642,6 +1644,7 @@ h2 = ("\t\tif (g_nav_request != 0) {\n"
       "\t\tif (g_field_copy_request != 0) {\n"
       "\t\t\tg_field_copy_request = 0;\n"
       "\t\t\tif (window_list != NULL && window_list->bw != NULL) {\n"
+      "\t\t\t\tfb_clipboard_clear(); /* ne maradjon benn az elozo mezo szovege */\n"
       "\t\t\t\tbrowser_window_key_press(window_list->bw, 1); /* NS_KEY_SELECT_ALL */\n"
       "\t\t\t\tbrowser_window_key_press(window_list->bw, 3); /* NS_KEY_COPY_SELECTION */\n"
       "\t\t\t\t{ const char *_ct = fb_clipboard_text();\n"
