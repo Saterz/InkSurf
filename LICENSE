@@ -1,0 +1,29 @@
+InkSurf — a NetSurf-based web browser plugin for KOReader on jailbroken Kindle.
+
+Copyright (C) 2026 the InkSurf authors.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 2 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+The full text of the GNU General Public License version 2 should accompany this
+software in a file named COPYING. If it does not, see
+<https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt>.
+
+--------------------------------------------------------------------------------
+This repository also distributes third-party components (NetSurf, aria2, OpenVPN,
+FBInk, libmobi, fonts, CA bundle) which remain under their own licenses. See
+THIRD_PARTY_NOTICES.md for the full list, licenses, and source locations.
+--------------------------------------------------------------------------------
+
+NOTE ON LICENSE CHOICE (remove this note before publishing if you like):
+GPL-2.0-or-later is recommended because the repository builds and ships a modified
+NetSurf (GPL-2.0), so the NetSurf patches in build.sh must be GPL-2.0 anyway, and a
+single repo license avoids ambiguity. If you would rather keep only YOUR Lua code
+under a permissive license (e.g. MIT) and treat the binaries as mere aggregation,
+you may — but the NetSurf modifications in build.sh stay GPL-2.0 regardless.

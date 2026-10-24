@@ -1,51 +1,80 @@
-# NetSurf a Kindle-re (KOReader mellé)
+# InkSurf
 
-Ez a repó a **NetSurf** böngészőt fordítja le a Kindle-re GitHub Actionsben.
-A NetSurf egy könnyű, valódi böngészőmotor, ami – a mi Lua-s böngészőnkkel ellentétben –
-**korlátozottan JavaScriptet is tud** (Duktape). A nehéz, JS-es oldalakhoz való;
-az egyszerűeket a KOReader-plugin beépített nézete gyorsabban kezeli.
+A real web browser for jailbroken Kindle, as a **KOReader plugin**. InkSurf
+embeds the **NetSurf** engine (framebuffer frontend, limited JavaScript) so pages
+with logins, forms, images and most file types work — things the stock Kindle
+browser can't do. It adds a touch toolbar, on-screen input via KOReader's own
+keyboard, downloads, torrent, OpenVPN, ad-blocking, reader mode and azw3→EPUB
+conversion.
 
-> Megjegyzés: a 2024-es Paperwhite (12. gen) nagyon új. Ez a build **kísérleti** –
-> az első cél az, hogy egyáltalán elinduljon a készüléken. A GitHub Actions naplója
-> mutatja, hol akad el; abból tudjuk finomítani. Ne várd, hogy elsőre tökéletes.
+> Status: works on a jailbroken Kindle Paperwhite (MTK / `hwtcon_v2`, e.g. PW5/PW6)
+> with KOReader. Built and tested against KOReader 2026.07.02.
 
-## Használat
+## Features
+- NetSurf engine with a custom e-ink touch toolbar (back / forward / reload /
+  reader / minimize / close) and tap-to-type URL bar using KOReader's keyboard.
+- **In-page text fields**: tap a field → KOReader keyboard opens over the frozen
+  page → your text is typed into the field (existing content is pre-loaded and
+  replaced).
+- Minimize / resume (the browser stays in the background; resume where you left off).
+- Pinch-zoom, drag-to-pan, horizontal scroll.
+- Reader mode (local, private — no third-party extraction service).
+- Downloads to `koreader/documents`; `.torrent` handed to a built-in aria2 manager.
+- azw3 (and other unsupported formats) → EPUB conversion, original deleted after.
+- OpenVPN support (any provider; per-server credentials) with kill-switch + DNS
+  protection.
+- Host-based ad/tracker blocking during browsing (restored on exit).
+- UI in **English / Hungarian / German**, switchable in Settings.
+- Self-contained: all data lives in the plugin's own `data/` subfolder; a
+  "Full cleanup / reset" button and uninstall = delete the folder.
 
-1. Hozz létre egy új, üres repót a GitHub-fiókodban (pl. `netsurf-kindle`).
-2. Tölts fel bele ebből a mappából mindent: `build.sh`, `README.md`, és a
-   `.github/workflows/build.yml` fájlt a mappaszerkezettel együtt.
-3. A repó **Actions** fülén engedélyezd a workflow-kat, majd nyomd meg a
-   **Run workflow** gombot (vagy pushold a `main`-re).
-4. A build végén az **Artifacts** alatt lesz egy `netsurf-kindle-…` csomag.
-   Töltsd le; ebben van a `netsurf` bináris és a `res/` mappa.
+## Requirements
+- A **jailbroken** Kindle with **KOReader** installed.
+- MTK-class device (PW5/PW6 and similar, `hwtcon_v2` e-ink). Other Kindles may need
+  changes to the framebuffer surface.
 
-## Telepítés a Kindle-re
+## Install (prebuilt)
+1. Download the plugin zip from **Releases**.
+2. Copy the `inksurf.koplugin` folder into `koreader/plugins/`.
+3. Restart KOReader. Open it from the main menu or KOReader Settings.
+4. (Optional) For VPN, drop your own `.ovpn` + `.auth` into `inksurf.koplugin/vpn/`
+   — see `vpn/README.txt`. **No VPN credentials are shipped in this repo.**
 
-1. A KOReader `plugins/` mappájában hozz létre egy `netsurf.koplugin` mappát.
-2. Tedd bele:
-   - `bin/netsurf`  ← a letöltött bináris
-   - `res/`         ← a letöltött erőforrások
-3. Indítsd újra a KOReadert. A „Web böngésző + VPN” menüben a
-   **NetSurf motor (JavaScript)** innentől aktív, és a linkeknél megjelenik a
-   „Megnyitás NetSurfben”.
+## Build the engine yourself
+The NetSurf binary is built by `build.sh` via GitHub Actions
+(`.github/workflows/build.yml`), using a `koxtoolchain` `kindlehf` cross-toolchain
+(built and cached by the workflow). `build.sh` downloads `netsurf-all-3.11`,
+cross-builds the dependencies, embeds the Kindle framebuffer surface and applies the
+InkSurf patches, and writes the results to `out/`. The workflow uploads them as the
+`netsurf-kindle` artifact; download it and copy `netsurf` and `res/` into
+`inksurf.koplugin/bin/`.
 
-(A plugin a binárist a `netsurf.koplugin/bin/netsurf` vagy `…/bin/nsfb` útvonalon keresi,
-illetve a beállításokban megadott egyedi útvonalon.)
+## Debugging
+Logging is **off by default**. Settings → "Debug log" turns on verbose logging to
+`data/netsurf.log` and `data/netsurf_field.log` for troubleshooting.
 
-## Mi történik a build során
+## License
+GPL-2.0-or-later. The project builds and ships a modified NetSurf (GPL-2.0), so the
+NetSurf patches in `build.sh` are GPL-2.0. See `LICENSE` and `THIRD_PARTY_NOTICES.md`
+for bundled components (NetSurf, aria2, OpenVPN, FBInk, libmobi, fonts, CA bundle)
+and their licenses/sources.
 
-- Megépül a Kindle-fordító (**koxtoolchain**, `kindlehf` cél) – ez lassú, ezért
-  gyorsítótárazzuk, a második futástól gyors.
-- Lefordul a NetSurf függőséglánca (libwapcaplet, libcss, libdom, libnsfb, …),
-  majd maga a NetSurf a **framebuffer** frontenddel és a **linux** felülettel
-  (közvetlenül a `/dev/fb0`-ra rajzol és a `/dev/input`-ot olvassa).
-- A JavaScript a beépített **Duktape**-pel épül.
+## Credits
+Engine: **NetSurf**. Runs inside **KOReader**. Reader-mode idea inspired by
+`omer-faruq/webbrowser.koplugin` (independent local implementation). See
+`THIRD_PARTY_NOTICES.md`.
 
-## Ismert nyitott pontok (ezeken fogunk iterálni)
+## Disclaimer
+For a device **you own and have modified yourself**. Jailbreaking may void your
+warranty and can violate the device vendor's terms of service. Use responsibly and
+only for lawful purposes. Provided "as is", without warranty of any kind.
 
-- **Érintés.** A framebuffer-frontend egeret vár; a Kindle érintését ehhez
-  hozzá kell igazítani. Ez a legnagyobb bizonytalanság.
-- **Betűk.** Most a beépített (internal) betűkészlettel épül (csúnyább, de
-  függőség nélküli). Ha megy, átállunk freetype-ra a szebb betűkért.
-- **A `kindlehf` cél** lehet, hogy a 2024-es modellhez igazítást igényel; a
-  workflow „Toolchain tuple” lépése kiírja, mit talált.
+---
+
+### Magyar (rövid)
+Valódi webböngésző jailbreakelt Kindle-re, KOReader-pluginként, a **NetSurf** motorral.
+Telepítés: a `inksurf.koplugin` mappát másold a `koreader/plugins/`-ba, és indítsd
+újra a KOReadert. A VPN-hez a saját `.ovpn` + `.auth` fájlodat tedd a `vpn/` mappába
+(a repo **nem** tartalmaz VPN-adatokat). A felület nyelve (angol/magyar/német) a
+beállításokban váltható. Licenc: GPL-2.0-or-later; a bundle-olt komponensek licencei a
+`THIRD_PARTY_NOTICES.md`-ben.
