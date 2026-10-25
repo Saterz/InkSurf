@@ -167,6 +167,31 @@ static int      kfb_fd = -1;
 static uint8_t *kfb_mem = NULL;      /* a valódi framebuffer mmap-je (8bpp) */
 static size_t   kfb_memlen = 0;
 static int      kfb_linelen = 0;     /* a fb sor hossza bájtban */
+static int      kfb_bpp     = 8;     /* a fb bitmélysége (8 = szürke Paperwhite, 32 = színes Colorsoft) */
+static int      kfb_bytespp = 1;     /* bájt/pixel = kfb_bpp/8 */
+
+/* Egy képpont kiírása a fizikai fb-be, bit-mélység szerint. v = 8 bites szürke.
+ * 8bpp: 1 bájt; 16bpp: RGB565 szürke; 32bpp: B,G,R,A (szürke mindhárom csatornán). */
+static inline void kfb_store(uint8_t *px, uint8_t v)
+{
+    switch (kfb_bytespp) {
+    case 1:
+        px[0] = v;
+        break;
+    case 2: {
+        uint16_t p = (uint16_t)(((v >> 3) << 11) | ((v >> 2) << 5) | (v >> 3));
+        px[0] = (uint8_t)(p & 0xFF);
+        px[1] = (uint8_t)(p >> 8);
+        break;
+    }
+    case 4:
+        px[0] = v; px[1] = v; px[2] = v; px[3] = 0xFF;
+        break;
+    default:
+        px[0] = v;
+        break;
+    }
+}
 
 /* ---- MTK (hwtcon) e-ink frissítés: a rajzolt régiót azonnal kitesszük a kijelzőre ----
  * Forrás: FBInk/eink/mtk-kindle.h (PW5/PW6, hwtcon_v2). A struktúra méretét az _IOW
@@ -447,6 +472,11 @@ static int kindle_initialise(nsfb_t *nsfb)
      * fent a saját eszköztár (KFB_TBAR_H), balra a gutter (KFB_GUTTER) */
     kfb_scrw = vinfo.xres;
     kfb_scrh = vinfo.yres;
+    kfb_bpp     = (vinfo.bits_per_pixel > 0) ? (int)vinfo.bits_per_pixel : 8;
+    kfb_bytespp = kfb_bpp / 8;
+    if (kfb_bytespp < 1) kfb_bytespp = 1;
+    ktlog("FB: xres=%u yres=%u bpp=%d bytespp=%d line_length=%d",
+          vinfo.xres, vinfo.yres, kfb_bpp, kfb_bytespp, kfb_linelen);
     nsfb->width  = vinfo.xres - KFB_GUTTER;
     nsfb->height = vinfo.yres - KFB_TBAR_H;
     nsfb->format = NSFB_FMT_ABGR8888;
@@ -498,13 +528,14 @@ static int kindle_update(nsfb_t *nsfb, nsfb_bbox_t *box)
     for (y = y0; y < y1; y++) {
         const uint32_t *src = (const uint32_t *)(nsfb->ptr + (size_t)y * nsfb->linelen);
         uint8_t *dst = kfb_mem + (size_t)(y + KFB_TBAR_H) * kfb_linelen; /* fizikai sor (sáv alatt) */
-        if (x0 == 0) { int gi; for (gi = 0; gi < KFB_GUTTER; gi++) dst[gi] = 0xFF; } /* bal gutter fehér */
+        if (x0 == 0) { int gi; for (gi = 0; gi < KFB_GUTTER; gi++) kfb_store(dst + (size_t)gi * kfb_bytespp, 0xFF); } /* bal gutter fehér */
         for (x = x0; x < x1; x++) {
             uint32_t p = src[x];
             int r =  p        & 0xFF;
             int g = (p >> 8)  & 0xFF;
             int b = (p >> 16) & 0xFF;
-            dst[x + KFB_GUTTER] = (uint8_t)((r * 77 + g * 151 + b * 28) >> 8); /* gutterrel eltolva */
+            uint8_t v = (uint8_t)((r * 77 + g * 151 + b * 28) >> 8);
+            kfb_store(dst + (size_t)(x + KFB_GUTTER) * kfb_bytespp, v); /* gutterrel eltolva, bpp szerint */
         }
     }
 
@@ -550,7 +581,7 @@ static void kfb_mtk_update(int x, int y, int w, int h, int full)
 static void kfb_px(int x, int y, uint8_t v)
 {
     if (x < 0 || y < 0 || x >= kfb_scrw || y >= kfb_scrh) return;
-    kfb_mem[(size_t)y * kfb_linelen + x] = v;
+    kfb_store(kfb_mem + (size_t)y * kfb_linelen + (size_t)x * kfb_bytespp, v);
 }
 static void kfb_fill(int x, int y, int w, int h, uint8_t v)
 {
@@ -662,13 +693,14 @@ static void full_reblit(nsfb_t *nsfb)
     for (y = 0; y < nsfb->height; y++) {
         const uint32_t *src = (const uint32_t *)(nsfb->ptr + (size_t)y * nsfb->linelen);
         uint8_t *dst = kfb_mem + (size_t)(y + KFB_TBAR_H) * kfb_linelen;
-        int gi; for (gi = 0; gi < KFB_GUTTER; gi++) dst[gi] = 0xFF;
+        int gi; for (gi = 0; gi < KFB_GUTTER; gi++) kfb_store(dst + (size_t)gi * kfb_bytespp, 0xFF);
         for (x = 0; x < nsfb->width; x++) {
             uint32_t p = src[x];
             int r =  p        & 0xFF;
             int g = (p >> 8)  & 0xFF;
             int b = (p >> 16) & 0xFF;
-            dst[x + KFB_GUTTER] = (uint8_t)((r * 77 + g * 151 + b * 28) >> 8);
+            uint8_t v = (uint8_t)((r * 77 + g * 151 + b * 28) >> 8);
+            kfb_store(dst + (size_t)(x + KFB_GUTTER) * kfb_bytespp, v);
         }
     }
     draw_toolbar(nsfb, 0);                       /* a sávot is újrarajzoljuk */
