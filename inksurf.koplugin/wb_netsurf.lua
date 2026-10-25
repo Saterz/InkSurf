@@ -168,7 +168,7 @@ local function monitorTail(opts)
     s[#s+1] = "while kill -0 $NSPID 2>/dev/null; do "
         .. "S=$(sed -e 's/.*) //' /proc/$NSPID/stat 2>/dev/null | cut -d' ' -f1); "
         .. "case \"$S\" in T|t) MINI=1; break;; esac; "
-        .. "sleep 0.3; done\n"
+        .. "sleep 0.3 2>/dev/null || sleep 1; done\n"
     s[#s+1] = "[ -n \"$FBPID\" ] && kill $FBPID 2>/dev/null\n"
     s[#s+1] = "[ -n \"$DLPID\" ] && kill $DLPID 2>/dev/null\n"
     s[#s+1] = "kill $WDPID 2>/dev/null\n"
