@@ -169,6 +169,15 @@ static size_t   kfb_memlen = 0;
 static int      kfb_linelen = 0;     /* a fb sor hossza bájtban */
 static int      kfb_bpp     = 8;     /* a fb bitmélysége (8 = szürke Paperwhite, 32 = színes Colorsoft) */
 static int      kfb_bytespp = 1;     /* bájt/pixel = kfb_bpp/8 */
+/* a fb R/G/B/A csatornáinak bájt-indexe (alap: BGRA / XRGB8888 little-endian) */
+static int      ch_r = 2, ch_g = 1, ch_b = 0, ch_a = 3;
+
+/* Színes képpont kiírása (>=24bpp): a valós R,G,B a fb csatorna-sorrendje szerint. */
+static inline void kfb_store_color(uint8_t *px, int r, int g, int b)
+{
+    px[ch_r] = (uint8_t)r; px[ch_g] = (uint8_t)g; px[ch_b] = (uint8_t)b;
+    if (ch_a >= 0 && ch_a < kfb_bytespp) px[ch_a] = 0xFF;
+}
 
 /* Egy képpont kiírása a fizikai fb-be, bit-mélység szerint. v = 8 bites szürke.
  * 8bpp: 1 bájt; 16bpp: RGB565 szürke; 32bpp: B,G,R,A (szürke mindhárom csatornán). */
@@ -477,6 +486,17 @@ static int kindle_initialise(nsfb_t *nsfb)
     if (kfb_bytespp < 1) kfb_bytespp = 1;
     ktlog("FB: xres=%u yres=%u bpp=%d bytespp=%d line_length=%d",
           vinfo.xres, vinfo.yres, kfb_bpp, kfb_bytespp, kfb_linelen);
+    if (kfb_bytespp >= 3) {
+        int r_ = (int)(vinfo.red.offset   / 8);
+        int g_ = (int)(vinfo.green.offset / 8);
+        int b_ = (int)(vinfo.blue.offset  / 8);
+        int a_ = vinfo.transp.length ? (int)(vinfo.transp.offset / 8) : -1;
+        if (r_ >= 0 && r_ < kfb_bytespp && g_ >= 0 && g_ < kfb_bytespp && b_ >= 0 && b_ < kfb_bytespp) {
+            ch_r = r_; ch_g = g_; ch_b = b_; ch_a = a_;   /* a fb által jelzett sorrend */
+        }
+        ktlog("FB color: ch_r=%d ch_g=%d ch_b=%d ch_a=%d (red.off=%u green.off=%u blue.off=%u)",
+              ch_r, ch_g, ch_b, ch_a, vinfo.red.offset, vinfo.green.offset, vinfo.blue.offset);
+    }
     nsfb->width  = vinfo.xres - KFB_GUTTER;
     nsfb->height = vinfo.yres - KFB_TBAR_H;
     nsfb->format = NSFB_FMT_ABGR8888;
@@ -534,8 +554,12 @@ static int kindle_update(nsfb_t *nsfb, nsfb_bbox_t *box)
             int r =  p        & 0xFF;
             int g = (p >> 8)  & 0xFF;
             int b = (p >> 16) & 0xFF;
-            uint8_t v = (uint8_t)((r * 77 + g * 151 + b * 28) >> 8);
-            kfb_store(dst + (size_t)(x + KFB_GUTTER) * kfb_bytespp, v); /* gutterrel eltolva, bpp szerint */
+            uint8_t *d = dst + (size_t)(x + KFB_GUTTER) * kfb_bytespp;
+            if (kfb_bytespp >= 3) {
+                kfb_store_color(d, r, g, b);           /* színes panel: valódi RGB */
+            } else {
+                kfb_store(d, (uint8_t)((r * 77 + g * 151 + b * 28) >> 8)); /* szürke */
+            }
         }
     }
 
@@ -699,8 +723,12 @@ static void full_reblit(nsfb_t *nsfb)
             int r =  p        & 0xFF;
             int g = (p >> 8)  & 0xFF;
             int b = (p >> 16) & 0xFF;
-            uint8_t v = (uint8_t)((r * 77 + g * 151 + b * 28) >> 8);
-            kfb_store(dst + (size_t)(x + KFB_GUTTER) * kfb_bytespp, v);
+            uint8_t *d = dst + (size_t)(x + KFB_GUTTER) * kfb_bytespp;
+            if (kfb_bytespp >= 3) {
+                kfb_store_color(d, r, g, b);
+            } else {
+                kfb_store(d, (uint8_t)((r * 77 + g * 151 + b * 28) >> 8));
+            }
         }
     }
     draw_toolbar(nsfb, 0);                       /* a sávot is újrarajzoljuk */
