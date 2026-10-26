@@ -348,6 +348,7 @@ static const unsigned short kfb_font[95][28] = {
 
 #define KFB_TBAR_H 72          /* a saját eszköztár magassága (fizikai) */
 #define KFB_GUTTER 14          /* bal margó a tartalomnak (zoomnál is marad) */
+#define KFB_RGUT   64          /* jobb oldali oszlop: ▲ PageUp (fent) / ▼ PageDown (lent) */
 
 static int kfb_scrw = 0, kfb_scrh = 0;   /* FIZIKAI kijelzőméret (sáv+gutter együtt) */
 
@@ -497,7 +498,7 @@ static int kindle_initialise(nsfb_t *nsfb)
         ktlog("FB color: ch_r=%d ch_g=%d ch_b=%d ch_a=%d (red.off=%u green.off=%u blue.off=%u)",
               ch_r, ch_g, ch_b, ch_a, vinfo.red.offset, vinfo.green.offset, vinfo.blue.offset);
     }
-    nsfb->width  = vinfo.xres - KFB_GUTTER;
+    nsfb->width  = vinfo.xres - KFB_GUTTER - KFB_RGUT;   /* jobb oldali lapozó-oszlopnak is hely */
     nsfb->height = vinfo.yres - KFB_TBAR_H;
     nsfb->format = NSFB_FMT_ABGR8888;
     select_plotters(nsfb);               /* bpp = 32 */
@@ -708,6 +709,34 @@ static void draw_toolbar(nsfb_t *nsfb, int do_update)
     if (do_update) kfb_mtk_update(0, 0, kfb_scrw, KFB_TBAR_H, 0);
 }
 
+/* ---- jobb oldali lapozó-oszlop: fent ▲ (PageUp), lent ▼ (PageDown) ---- */
+static void draw_sidebar(nsfb_t *nsfb, int do_update)
+{
+    int x0   = kfb_scrw - KFB_RGUT;
+    int top  = KFB_TBAR_H;
+    int h    = kfb_scrh - top;
+    int midy = top + h / 2;
+    int cx   = x0 + KFB_RGUT / 2;
+    int s    = 16;                 /* háromszög mérete */
+    int r;
+    (void)nsfb;
+    if (kfb_mem == NULL || KFB_RGUT <= 0) return;
+    kfb_fill(x0, top, KFB_RGUT, h, 0xFF);        /* fehér háttér */
+    kfb_fill(x0, top, 2, h, 0x40);               /* bal elválasztó vonal */
+    kfb_fill(x0, midy - 1, KFB_RGUT, 2, 0x40);   /* vízszintes osztóvonal a két gomb közt */
+    /* felső gomb: ▲ (csúcs fent) */
+    {
+        int by = top + (midy - top) / 2 - s / 2;
+        for (r = 0; r <= s; r++) kfb_fill(cx - r, by + r, 2 * r + 1, 1, 0x00);
+    }
+    /* alsó gomb: ▼ (csúcs lent) */
+    {
+        int by = midy + (kfb_scrh - midy) / 2 - s / 2;
+        for (r = 0; r <= s; r++) kfb_fill(cx - (s - r), by + r, 2 * (s - r) + 1, 1, 0x00);
+    }
+    if (do_update) kfb_mtk_update(x0, top, KFB_RGUT, h, 1);
+}
+
 /* a teljes megrajzolt kép (nsfb->ptr) újbóli kiírása a kijelzőre + teljes e-ink frissítés.
  * Folytatáskor (SIGCONT) hívjuk, amikor a KOReader közben átrajzolta a framebuffert. */
 static void full_reblit(nsfb_t *nsfb)
@@ -732,6 +761,7 @@ static void full_reblit(nsfb_t *nsfb)
         }
     }
     draw_toolbar(nsfb, 0);                       /* a sávot is újrarajzoljuk */
+    draw_sidebar(nsfb, 0);                       /* a jobb oldali lapozó-oszlop */
     kfb_mtk_update(0, 0, kfb_scrw, kfb_scrh, 1); /* egyetlen teljes, tiszta frissítés */
 }
 
@@ -992,6 +1022,13 @@ static void ts_process_frame(nsfb_t *nsfb)
                     default: break;
                 }
             }
+        } else if (g_start_x >= kfb_scrw - KFB_RGUT) {
+            /* jobb oldali lapozó-oszlop: felső fél = PageUp, alsó fél = PageDown */
+            if (!g_scrolling) {
+                int midy = KFB_TBAR_H + (kfb_scrh - KFB_TBAR_H) / 2;
+                if (g_start_y < midy) evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_PAGEUP);
+                else                  evq_push_key(NSFB_EVENT_KEY_DOWN, NSFB_KEY_PAGEDOWN);
+            }
         } else if (!g_scrolling) {
             /* tartalmi koppintás -> kattintás (gutter/sáv eltolással) */
             int cx = g_start_x - KFB_GUTTER, cy = g_start_y - KFB_TBAR_H;
@@ -1035,6 +1072,9 @@ static bool kindle_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
         g_toolbar_url_dirty = 0;
         draw_toolbar(nsfb, 1);
     }
+
+    /* a jobb oldali lapozó-oszlopot egyszer kirajzoljuk (a tartalom sosem írja felül) */
+    { static int sb_once = 0; if (!sb_once) { sb_once = 1; draw_sidebar(nsfb, 1); } }
 
     /* oldalon belüli mező fókuszba került -> KOReader billentyűzet overlay (a böngésző
      *  a háttérben marad, az ablak rárajzolódik), majd a beírt szöveget injektáljuk */
