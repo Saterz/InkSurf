@@ -1811,6 +1811,66 @@ PYTB
 grep -q "g_nav_request" "$SRC/netsurf/frontends/framebuffer/gui.c" \
   && echo "   saját eszköztár (gui.c) patch OK" || { echo "HIBA: saját eszköztár patch nem sikerült"; exit 1; }
 
+# 2p) User-Agent felülírása környezeti változóból (NETSURF_USER_AGENT), hogy a plugin
+#     beállításból váltható legyen (pl. Firefox/Chrome UA a jobb oldalkompatibilitásért).
+python3 - "$SRC/netsurf/utils/useragent.c" <<'PYUA'
+import sys
+p = sys.argv[1]; s = open(p).read()
+anc = "        char *ua_string;\n        int len;\n"
+if anc not in s:
+    sys.stderr.write("UA-PATCH HIBA: horgony nem talalhato\n"); sys.exit(2)
+add = anc + ("\n        {\n"
+             "                const char *_envua = getenv(\"NETSURF_USER_AGENT\");\n"
+             "                if (_envua != NULL && _envua[0] != 0) {\n"
+             "                        core_user_agent_string = strdup(_envua);\n"
+             "                        if (core_user_agent_string != NULL) {\n"
+             "                                NSLOG(netsurf, INFO, \"User agent from env: %s\", core_user_agent_string);\n"
+             "                                return;\n"
+             "                        }\n"
+             "                }\n"
+             "        }\n")
+s = s.replace(anc, add, 1)
+# getenv/strdup -> stdlib.h/string.h; tegyuk be, ha hianyoznak
+if '#include <stdlib.h>' not in s:
+    s = s.replace('#include "utils/useragent.h"', '#include <stdlib.h>\n#include "utils/useragent.h"', 1)
+open(p, "w").write(s)
+sys.stderr.write("useragent.c: NETSURF_USER_AGENT env override beszurva\n")
+PYUA
+grep -q "NETSURF_USER_AGENT" "$SRC/netsurf/utils/useragent.c" && echo "   UA env-override OK" || { echo "HIBA: UA patch nem sikerult"; exit 1; }
+
+# 2q) Lapozás átfedéssel: a PageUp/PageDown mindig a nézetmagasságnyit görgessen egy
+#     fix átfedéssel (ne maradjon le sor), egységesen minden tartalomra.
+python3 - "$SRC/netsurf/frontends/framebuffer/gui.c" <<'PYPAGE'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = ("\t\tcase NSFB_KEY_PAGEUP:\n"
+       "\t\t\tif (browser_window_key_press(gw->bw,\n"
+       "\t\t\t\t\tNS_KEY_PAGE_UP) == false)\n"
+       "\t\t\t\twidget_scroll_y(gw, -fbtk_get_height(\n"
+       "\t\t\t\t\t\tgw->browser), false);\n"
+       "\t\t\tbreak;\n"
+       "\n"
+       "\t\tcase NSFB_KEY_PAGEDOWN:\n"
+       "\t\t\tif (browser_window_key_press(gw->bw,\n"
+       "\t\t\t\t\tNS_KEY_PAGE_DOWN) == false)\n"
+       "\t\t\t\twidget_scroll_y(gw, fbtk_get_height(\n"
+       "\t\t\t\t\t\tgw->browser), false);\n"
+       "\t\t\tbreak;\n")
+new = ("\t\tcase NSFB_KEY_PAGEUP:\n"
+       "\t\t\twidget_scroll_y(gw, -(fbtk_get_height(gw->browser) - 56), false);\n"
+       "\t\t\tbreak;\n"
+       "\n"
+       "\t\tcase NSFB_KEY_PAGEDOWN:\n"
+       "\t\t\twidget_scroll_y(gw, (fbtk_get_height(gw->browser) - 56), false);\n"
+       "\t\t\tbreak;\n")
+if old not in s:
+    sys.stderr.write("PAGE-PATCH FIGYELEM: a PageUp/Down horgony nem egyezik pontosan; kihagyva\n")
+else:
+    s = s.replace(old, new, 1)
+    open(p, "w").write(s)
+    sys.stderr.write("gui.c: lapozas atfedessel (56px) beszurva\n")
+PYPAGE
+
 # 3) NetSurf, framebuffer frontend, linux felület (/dev/fb + /dev/input), JS (duktape)
 echo "==> netsurf (framebuffer)"
 make -C "$SRC/netsurf" -j"$JOBS" \
