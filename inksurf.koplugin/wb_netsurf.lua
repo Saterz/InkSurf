@@ -74,6 +74,20 @@ function NS:_signalfile() return (self.data_dir or "/mnt/us/koreader") .. "/nets
 -- látogatott címek naplója (a NetSurf ide fűzi minden navigációnál)
 function NS:_historyfile() return (self.data_dir or "/mnt/us/koreader") .. "/netsurf.history" end
 -- a mezőbe injektálandó szöveg (a KOReader billentyűzettel beírva)
+-- Böngésző-azonosító (User-Agent). Alapból Firefox (jobb oldalkompatibilitás a beégetett
+-- NetSurf-UA-nál); "netsurf" esetén a motor saját UA-ja marad (nincs env-export).
+local UA_STRINGS = {
+    firefox = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    chrome  = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+}
+function NS:_userAgent()
+    -- Alapértelmezett: NetSurf (a beépített UA) — ezt fogadja el a beépített DuckDuckGo
+    -- HTML-kereső is. A Firefox/Chrome opcionális (egyes oldalakhoz), de a DDG-keresőt
+    -- bot-ellenőrzésre válthatja.
+    local pref = (self.settings and self.settings:readSetting("netsurf_ua")) or "netsurf"
+    return UA_STRINGS[pref]   -- "netsurf"/ismeretlen -> nil -> a beépített UA marad
+end
+
 function NS:_injectfile() return (self.data_dir or "/mnt/us/koreader") .. "/netsurf.inject" end
 function NS:_fieldtextfile() return (self.data_dir or "/mnt/us/koreader") .. "/netsurf.fieldtext" end
 function NS:_fieldlog() return (self.data_dir or "/mnt/us/koreader") .. "/netsurf_field.log" end
@@ -520,6 +534,7 @@ function NS:run(url)
         "export NETSURF_HISTORY_FILE=", q(self:_historyfile()), "\n",
         "export NETSURF_INJECT_FILE=", q(self:_injectfile()), "\n",
         "export NETSURF_FIELD_TEXT=", q(self:_fieldtextfile()), "\n",
+        (function() local _ua = self:_userAgent(); return _ua and ("export NETSURF_USER_AGENT=" .. q(_ua) .. "\n") or "" end)(),
         verbose and ("export NETSURF_FIELD_LOG=" .. q(self:_fieldlog()) .. "\n") or "",
         hostsBlock(nsdir, data, hosts_adblock),
         -- Kindle rendszer-statuszsáv (óra/akku chrome) elrejtése böngészés idejére
@@ -568,6 +583,7 @@ function NS:resume()
         "export NETSURF_HISTORY_FILE=", q(self:_historyfile()), "\n",
         "export NETSURF_INJECT_FILE=", q(self:_injectfile()), "\n",
         "export NETSURF_FIELD_TEXT=", q(self:_fieldtextfile()), "\n",
+        (function() local _ua = self:_userAgent(); return _ua and ("export NETSURF_USER_AGENT=" .. q(_ua) .. "\n") or "" end)(),
         verbose and ("export NETSURF_FIELD_LOG=" .. q(self:_fieldlog()) .. "\n") or "",
         "NSPID=", tostring(pid), "\n",
         hostsBlock(nsdir, data, hosts_adblock),

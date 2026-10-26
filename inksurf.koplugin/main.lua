@@ -456,6 +456,7 @@ function WebBrowser:init()
         download_dir_fn = function() return self:downloadDir() end,
         before_open = function() self:closeMenu() end,
         can_run_fn = function() return not self:torrentVpnOnly() or VPN:isUp() end,
+        on_unopenable = function(paths) self:offerConvertOrSaved(paths) end,
     }
     NetSurf:setup{
         plugin_dir = plugin_dir,
@@ -749,6 +750,30 @@ function WebBrowser:addToMainMenu(menu_items)
                             self.settings:saveSetting("netsurf_hosts_adblock", not (self.settings:readSetting("netsurf_hosts_adblock") ~= false))
                             self.settings:flush()
                         end,
+                    },
+                    {
+                        text = S("Böngésző-azonosító (User-Agent)"),
+                        help_text = S("Alapértelmezett: NetSurf — ezt fogadja el a beépített DuckDuckGo-kereső is. A Firefox/Chrome egyes oldalakon segíthet, DE a beépített keresőt bot-ellenőrzésre válthatja. (Cloudflare JS-ellenőrzést egyik sem old meg.)"),
+                        sub_item_table = {
+                            {
+                                text = S("NetSurf (a motor saját azonosítója)"),
+                                radio = true,
+                                checked_func = function() return (self.settings:readSetting("netsurf_ua") or "netsurf") == "netsurf" end,
+                                callback = function() self.settings:saveSetting("netsurf_ua", "netsurf"); self.settings:flush() end,
+                            },
+                            {
+                                text = "Firefox",
+                                radio = true,
+                                checked_func = function() return self.settings:readSetting("netsurf_ua") == "firefox" end,
+                                callback = function() self.settings:saveSetting("netsurf_ua", "firefox"); self.settings:flush() end,
+                            },
+                            {
+                                text = "Chrome",
+                                radio = true,
+                                checked_func = function() return self.settings:readSetting("netsurf_ua") == "chrome" end,
+                                callback = function() self.settings:saveSetting("netsurf_ua", "chrome"); self.settings:flush() end,
+                            },
+                        },
                     },
                     {
                         text_func = function() return S("Letöltési mappa: ") .. (self:downloadDir() or "?") end,
@@ -2046,6 +2071,36 @@ function WebBrowser:openKoreaderTopMenu()
             end
         end
     end)
+end
+
+-- KOReader által NEM megnyitható kész fájl(ok): ha van köztük MOBI-családbeli
+-- (azw3/mobi/…) és megvan a konverter, EPUB-ra alakítást ajánlunk; különben csak
+-- jelezzük, hogy elmentve. Közös út a NetSurf-letöltéshez és a torrenthez.
+function WebBrowser:offerConvertOrSaved(paths)
+    if not paths or #paths == 0 then return end
+    local target
+    for _, p in ipairs(paths) do
+        local ext = (p:match("%.([%w]+)$") or ""):lower()
+        if MOBI_FAMILY[ext] then target = p; break end
+    end
+    if target and hasConverter() then
+        UIManager:show(ConfirmBox:new{
+            text = target .. S("\n\nEzt a KOReader nem nyitja meg közvetlenül.\nÁtalakítsam EPUB-ba és megnyissam?\n(Az eredeti fájl a sikeres konvertálás után törlődik.)"),
+            ok_text = S("Konvertálás"), cancel_text = S("Később"),
+            ok_callback = function()
+                self:status(S("Konvertálás EPUB-ba…"))
+                local epub, err = convertToEpub(target)
+                self:status(nil)
+                if epub then
+                    require("apps/reader/readerui"):showReader(epub)
+                else
+                    self:showError(err or S("A konverzió nem sikerült."))
+                end
+            end,
+        })
+    else
+        UIManager:show(InfoMessage:new{ text = (paths[#paths] or "") .. S("\n\n(A fájl el van mentve.)") })
+    end
 end
 
 function WebBrowser:handleNetsurfDownloads(paths)

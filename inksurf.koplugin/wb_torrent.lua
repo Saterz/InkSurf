@@ -151,6 +151,7 @@ function T:setup(opts)
     self.download_dir_fn = opts.download_dir_fn
     self.before_open = opts.before_open
     self.can_run_fn = opts.can_run_fn -- pl. "csak VPN-nel": false esetén nem indul/folytatódik
+    self.on_unopenable = opts.on_unopenable -- KOReader által nem nyitható kész fájlok (pl. azw3 -> EPUB felajánlás)
     if not self.settings then
         self.settings = LuaSettings:open(opts.settings_path or (DataStorage:getSettingsDir() .. "/inksurf_torrent.lua"))
         self.jobs = self.settings:readSetting("jobs") or {}
@@ -481,6 +482,9 @@ function T:finish(job)
         table.insert(buttons, {{ text = S("Bezárás"), callback = function() UIManager:close(dlg) end }})
         dlg = ButtonDialog:new{ title = S("Kész: ") .. job.name .. "\nMelyiket nyissam meg?", buttons = buttons }
         UIManager:show(dlg)
+    elseif #moved > 0 and self.on_unopenable then
+        -- KOReader nem tudja megnyitni (pl. azw3): a főmodul felajánlhatja az EPUB-konverziót
+        self.on_unopenable(moved)
     else
         UIManager:show(InfoMessage:new{
             text = S("Kész a torrent letöltés:\n") .. job.name .. "\n\n"
